@@ -37,3 +37,21 @@ def test_unknown_resolver_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "new.sqlite3")
     with pytest.raises(ValueError, match="unknown engineer"):
         import_data(path)
+
+
+def test_demo_tickets_skip_empty_database_without_consuming_flag(tmp_path, monkeypatch):
+    """An unseeded database must not mark the one-shot demo seeding as done."""
+    from backend import config, seed as seed_module
+    from backend.store import db, initialize
+
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "empty.sqlite3")
+    initialize()
+    assert seed_module.seed_demo_tickets() is False
+    with db() as c:
+        assert not c.execute(
+            "SELECT 1 FROM metadata WHERE key='demo_tickets_v2'"
+        ).fetchone()
+    seed_module.seed()
+    assert seed_module.seed_demo_tickets() is True
+    with db() as c:
+        assert c.execute("SELECT COUNT(*) FROM assignments").fetchone()[0] > 0

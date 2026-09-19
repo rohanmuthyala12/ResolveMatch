@@ -290,6 +290,9 @@ def seed_demo_tickets():
                (SELECT COUNT(*) FROM assignments a WHERE a.engineer_id=e.id AND a.completed_at IS NULL) AS load
                FROM engineers e ORDER BY e.id"""
         ).fetchall()
+        # An unseeded database must not consume the one-shot flag.
+        if not engineers:
+            return False
         used = {}
         for e in engineers:
             pool = DEMO_TICKETS.get(e["team"]) or [
