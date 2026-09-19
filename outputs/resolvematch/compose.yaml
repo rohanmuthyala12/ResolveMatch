@@ -1,0 +1,15 @@
+services:
+  resolvematch:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      TRUEFORGE_URL: http://host.docker.internal:8790
+      TRUEFORGE_AGENT_NAME: resolve-match
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - resolvematch-data:/app/.local
+    restart: unless-stopped
+volumes:
+  resolvematch-data:
