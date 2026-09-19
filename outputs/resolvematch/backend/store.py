@@ -76,6 +76,9 @@ def initialize():
         CREATE INDEX IF NOT EXISTS incidents_resolver ON incidents(resolved_by);
         CREATE INDEX IF NOT EXISTS assignments_engineer ON assignments(engineer_id,completed_at);
         """)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(tickets)")}
+        if "attempts" not in cols:
+            c.execute("ALTER TABLE tickets ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
 
 
 def audit(c, actor, action, ticket_id=None, details=None):

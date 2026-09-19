@@ -1610,3 +1610,7 @@ details[open] summary > svg {
 .engineer-tile > small {
   display: block;
 }
+
+.reassign { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; width: 100%; }
+.reassign select, .reassign input { padding: 8px 10px; border: 1px solid var(--line, #d9ded9); border-radius: 8px; font: inherit; background: #fff; }
+.reassign input { flex: 1; min-width: 140px; }

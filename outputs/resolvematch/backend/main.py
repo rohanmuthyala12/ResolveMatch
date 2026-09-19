@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import config, personas, service, trueforge
+from . import config, ops, personas, service, trueforge
+from .seed import seed_demo_tickets
 from .store import audit, db, engineer_rows, initialize, now, ticket_row
 from .tools import mcp
 
@@ -49,6 +50,7 @@ async def monitor():
 @asynccontextmanager
 async def lifespan(app):
     initialize()
+    seed_demo_tickets()
     async with mcp.session_manager.run():
         task = asyncio.create_task(monitor())
         yield
@@ -170,6 +172,11 @@ class TicketInput(StrictModel):
     description: str = Field(min_length=15, max_length=12000)
     severity: Literal["Low", "Medium", "High", "Critical"] = "High"
     team: str = Field(default="", max_length=80)
+
+
+class Reassign(StrictModel):
+    engineer_id: str = Field(min_length=1, max_length=40)
+    reason: str = Field(default="", max_length=300)
 
 
 class Decision(StrictModel):
@@ -390,6 +397,16 @@ async def decision(ticket_id: str, body: Decision, request: Request):
     return get_ticket(ticket_id)
 
 
+@app.post("/api/tickets/{ticket_id}/fallback-decision")
+def fallback_decision(ticket_id: str, body: Decision, request: Request):
+    return service.decide_fallback(ticket_id, body.allow, body.version, actor(request))
+
+
+@app.post("/api/tickets/{ticket_id}/reassign")
+def reassign(ticket_id: str, body: Reassign, request: Request):
+    return service.reassign(ticket_id, body.engineer_id, actor(request), body.reason)
+
+
 @app.post("/api/tickets/{ticket_id}/resolve")
 def resolve(ticket_id: str, request: Request):
     return service.resolve(ticket_id, actor(request))
@@ -407,6 +424,11 @@ def incidents(q: str = ""):
                 ("%" + q + "%", "%" + q + "%"),
             )
         ]
+
+
+@app.get("/api/ops")
+def operations():
+    return ops.overview()
 
 
 @app.get("/api/audit")

@@ -2,11 +2,12 @@
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
 
-from . import config
+from . import config, routing
 from .store import audit, db, now, ticket_row
 
 
@@ -57,47 +58,127 @@ async def connection_status():
         }
 
 
+async def launch(ticket_id):
+    session = (
+        await request("POST", "/sessions", {"agent": {"name": config.AGENT_NAME}})
+    )["data"]
+    with db(True) as c:
+        c.execute(
+            "UPDATE tickets SET session_id=? WHERE id=?", (session["id"], ticket_id)
+        )
+    turn = (
+        await request(
+            "POST",
+            f"/sessions/{session['id']}/turns",
+            {
+                "stream": False,
+                "input": [
+                    {
+                        "type": "user.message",
+                        "content": f"Route ticket {ticket_id}. Read it using get_ticket, use the evidence and ranking tools, then propose the primary assign_ticket call for human approval. Never assign without approval.",
+                    }
+                ],
+            },
+        )
+    )["data"]
+    with db(True) as c:
+        c.execute("UPDATE tickets SET turn_id=? WHERE id=?", (turn["id"], ticket_id))
+
+
+def runs_this_hour(c):
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    return c.execute(
+        "SELECT COUNT(*) FROM audit WHERE action='routing.started' AND timestamp>?",
+        (cutoff,),
+    ).fetchone()[0]
+
+
 async def start(ticket_id, actor="operator"):
     with db(True) as c:
         t = ticket_row(c, ticket_id)
-        if t["status"] not in ("new", "error", "manual_review"):
+        if runs_this_hour(c) >= config.RUNS_PER_HOUR:
+            audit(c, "system", "budget.blocked", ticket_id, {"limit": config.RUNS_PER_HOUR})
+            raise ValueError(
+                f"Hourly agent run budget reached ({config.RUNS_PER_HOUR}). Try again later."
+            )
+        if t["status"] not in ("new", "error", "manual_review", "fallback_review"):
             raise ValueError("This ticket cannot start a new run in its current state")
         c.execute(
-            "UPDATE tickets SET status='routing',error=NULL,recommendation=NULL,events='[]',agent_output='',run_started=?,session_id=NULL,turn_id=NULL WHERE id=?",
+            "UPDATE tickets SET status='routing',error=NULL,recommendation=NULL,events='[]',agent_output='',run_started=?,session_id=NULL,turn_id=NULL,attempts=0 WHERE id=?",
             (time.time(), ticket_id),
         )
         c.execute("DELETE FROM approvals WHERE ticket_id=?", (ticket_id,))
         audit(c, actor, "routing.started", ticket_id)
     try:
-        session = (
-            await request("POST", "/sessions", {"agent": {"name": config.AGENT_NAME}})
-        )["data"]
-        with db(True) as c:
-            c.execute(
-                "UPDATE tickets SET session_id=? WHERE id=?", (session["id"], ticket_id)
-            )
-        turn = (
-            await request(
-                "POST",
-                f"/sessions/{session['id']}/turns",
-                {
-                    "stream": False,
-                    "input": [
-                        {
-                            "type": "user.message",
-                            "content": f"Route ticket {ticket_id}. Read it using get_ticket, use the evidence and ranking tools, then propose the primary assign_ticket call for human approval. Never assign without approval.",
-                        }
-                    ],
-                },
-            )
-        )["data"]
-        with db(True) as c:
-            c.execute(
-                "UPDATE tickets SET turn_id=? WHERE id=?", (turn["id"], ticket_id)
-            )
+        await launch(ticket_id)
     except Exception as exc:
-        fail(ticket_id, str(exc))
-        raise
+        await recover(ticket_id, str(exc))
+
+
+async def recover(ticket_id, message):
+    """Retry a failed agent run once, then fall back to rules-only routing."""
+    with db() as c:
+        t = ticket_row(c, ticket_id)
+    if t["status"] in ("assigned", "resolved", "rejected"):
+        return
+    # A rejected key will not fix itself, so skip the retry.
+    if t["attempts"] < 1 and "401" not in message and "Incorrect API key" not in message:
+        with db(True) as c:
+            c.execute(
+                "UPDATE tickets SET attempts=attempts+1,status='routing',error=NULL,events='[]',agent_output='',run_started=?,session_id=NULL,turn_id=NULL WHERE id=?",
+                (time.time(), ticket_id),
+            )
+            audit(c, "system", "routing.retry", ticket_id, {"cause": message[:300]})
+        try:
+            await launch(ticket_id)
+            return
+        except Exception as exc:
+            message = str(exc)
+    fallback(ticket_id, message)
+
+
+def explain(message):
+    if "401" in message or "Incorrect API key" in message:
+        return "OpenAI rejected the API key configured in TrueForge. Replace it in Settings → Models → OpenAI → Edit, then run routing again."
+    if "429" in message:
+        return "The model provider reported a quota or rate limit. Check provider billing and limits, then retry."
+    return "The agent run failed."
+
+
+def fallback(ticket_id, message):
+    """Agent unavailable: compute the deterministic ranking directly and keep the human in the loop."""
+    with db(True) as c:
+        c.execute(
+            "UPDATE tickets SET status='routing',run_started=NULL WHERE id=?",
+            (ticket_id,),
+        )
+    result = routing.rank(ticket_id)
+    result["fallback"] = True
+    result["fallback_reason"] = message[:300]
+    status = "manual_review" if result["manual_review"] else "fallback_review"
+    with db(True) as c:
+        c.execute(
+            "UPDATE tickets SET recommendation=?,status=?,error=?,run_started=NULL,updated_at=? WHERE id=?",
+            (
+                json.dumps(result),
+                status,
+                explain(message)
+                + (
+                    " Showing rules-only routing."
+                    if status == "fallback_review"
+                    else " No confident rules-only match either."
+                ),
+                now(),
+                ticket_id,
+            ),
+        )
+        audit(
+            c,
+            "system",
+            "routing.fallback",
+            ticket_id,
+            {"reason": message[:300], "manual_review": result["manual_review"]},
+        )
 
 
 def fail(ticket_id, message):
@@ -151,9 +232,9 @@ async def sync(ticket_id):
             await request("POST", f"/sessions/{t['session_id']}/cancel", {})
         except ForgeError:
             pass
-        fail(
+        await recover(
             ticket_id,
-            "Routing exceeded the three-minute time limit. Inspect TrueForge and retry.",
+            "Routing exceeded the three-minute time limit.",
         )
         with db() as c:
             return ticket_row(c, ticket_id)
@@ -192,6 +273,11 @@ async def sync(ticket_id):
             for e in events
             if e.get("type") == "model.message" and isinstance(e.get("content"), str)
         )
+    if state["status"] in ("error", "cancelled"):
+        with db() as c:
+            if ticket_row(c, ticket_id)["status"] not in ("assigned", "resolved", "rejected"):
+                await recover(ticket_id, str(state.get("message", "")) or "Agent run failed")
+                return ticket_row(c, ticket_id)
     with db(True) as c:
         current = ticket_row(c, ticket_id)
         status = current["status"]

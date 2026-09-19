@@ -2,7 +2,7 @@
 
 import json
 
-from .store import audit, db, initialize
+from .store import audit, db, initialize, now, uid
 
 PEOPLE = [
     (
@@ -258,3 +258,58 @@ def seed():
 
 if __name__ == "__main__":
     print("Synthetic dataset seeded." if seed() else "Existing data preserved.")
+
+
+DEMO_TICKETS = {
+    "Data Platform": [
+        ("Databricks nightly job failing on schema drift", "Nightly customer ingestion job fails after an upstream schema change. Delta merge rejects CUSTOMER_ID."),
+        ("Spark job out of memory on daily aggregate", "Daily aggregate Spark job fails with executor out-of-memory errors since the data volume increased."),
+    ],
+    "Infrastructure": [
+        ("Kubernetes pods crash-looping after deploy", "Pods restart repeatedly after this morning's deployment. Readiness probe fails on the API service."),
+        ("Intermittent network timeouts between services", "Services in the cluster report sporadic connection timeouts to the internal gateway."),
+    ],
+    "Payments": [
+        ("Payment API returning 502 on checkout", "Checkout requests intermittently fail with 502 from the payment gateway after the latest release."),
+        ("Billing reconciliation mismatch for last night", "Nightly reconciliation shows unmatched settlements against the processor report."),
+    ],
+    "Identity": [
+        ("SSO login failing with SAML assertion error", "Users cannot sign in through SSO. The SAML assertion signature validation fails."),
+        ("Permission changes not applying after role update", "Role updates are saved but users keep their old permissions until they log out."),
+    ],
+}
+
+
+def seed_demo_tickets():
+    """Give every engineer active and resolved tickets so profiles are populated. Runs once."""
+    with db(True) as c:
+        if c.execute("SELECT 1 FROM metadata WHERE key='demo_tickets_v2'").fetchone():
+            return False
+        engineers = c.execute(
+            """SELECT e.id,e.team,e.capacity,e.baseline_load +
+               (SELECT COUNT(*) FROM assignments a WHERE a.engineer_id=e.id AND a.completed_at IS NULL) AS load
+               FROM engineers e ORDER BY e.id"""
+        ).fetchall()
+        used = {}
+        for e in engineers:
+            pool = DEMO_TICKETS.get(e["team"]) or [
+                ("Investigate failing job", "Job failing since this morning; needs investigation.")
+            ]
+            active = min(2, max(e["capacity"] - e["load"], 0))
+            for kind in ["active"] * active + ["resolved"] * 2:
+                n = used.get(e["team"], 0)
+                used[e["team"]] = n + 1
+                title, desc = pool[n % len(pool)]
+                done = kind == "resolved"
+                ident = uid("RM")
+                c.execute(
+                    "INSERT INTO tickets(id,title,description,severity,team,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (ident, title, desc, ("High", "Medium", "Critical")[n % 3], e["team"], "resolved" if done else "assigned", now(), now()),
+                )
+                c.execute(
+                    "INSERT INTO assignments(ticket_id,engineer_id,approved_by,assigned_at,completed_at) VALUES(?,?,?,?,?)",
+                    (ident, e["id"], "Dana Whitfield (Manager)", now(), now() if done else None),
+                )
+                audit(c, "system", "ticket.resolved" if done else "ticket.assigned", ident, {"engineer_id": e["id"], "demo": True})
+        c.execute("INSERT INTO metadata VALUES('demo_tickets_v2','1')")
+    return True

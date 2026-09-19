@@ -150,3 +150,15 @@ def test_seed_preserves_existing_data():
     assert seed() is False
     with db() as c:
         assert ticket_row(c, t["id"])["id"] == t["id"]
+
+
+def test_reassign_enforces_team_availability_and_capacity():
+    t = ticket()
+    rec = approved(t)
+    service.assign(t["id"], rec)
+    with pytest.raises(ValueError, match="owning team"):
+        service.reassign(t["id"], "ENG-006", "Kevin Shah (ENG-001)")
+    with pytest.raises(ValueError, match="unavailable"):
+        service.reassign(t["id"], "ENG-003", "Kevin Shah (ENG-001)")
+    moved = service.reassign(t["id"], "ENG-002", "Kevin Shah (ENG-001)", "busy")
+    assert moved["assignment"]["engineer_id"] == "ENG-002"

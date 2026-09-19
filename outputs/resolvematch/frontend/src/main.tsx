@@ -125,6 +125,23 @@ type QueueItem = {
   approved_by: string;
 };
 
+type Ops = {
+  budget: { used: number; limit: number; blocked: number };
+  runs: Record<string, number | null>;
+  tokens: Record<string, number>;
+  tools: { name: string; calls: number; avg_seconds: number | null }[];
+  guardrails: { name: string; count: number }[];
+  approvals: Record<string, number>;
+  recent_failures: {
+    timestamp: string;
+    action: string;
+    ticket_id: string | null;
+    details: { reason?: string; cause?: string; message?: string };
+  }[];
+};
+const secs = (n: number | null | undefined) =>
+  n == null ? "—" : n.toFixed(1) + "s";
+
 // Demo persona the requests are made as. Not a credential: the backend treats
 // it as a label for the audit trail and falls back to "operator" if unknown.
 let actingAs = "";
@@ -179,6 +196,9 @@ function App() {
   const [page, setPage] = useState("Overview"),
     [tickets, setTickets] = useState<Ticket[]>([]),
     [engineers, setEngineers] = useState<Engineer[]>([]),
+    [ops, setOps] = useState<Ops | null>(null),
+    [reassignTo, setReassignTo] = useState(""),
+    [reassignReason, setReassignReason] = useState(""),
     [status, setStatus] = useState<Status | null>(null);
   const [selected, setSelected] = useState<Ticket | null>(null),
     [modal, setModal] = useState(false),
@@ -241,6 +261,10 @@ function App() {
     if (page === "Incident library")
       api<Incident[]>("/incidents")
         .then(setIncidents)
+        .catch((e) => setError(e.message));
+    if (page === "Operations")
+      api<Ops>("/ops")
+        .then(setOps)
         .catch((e) => setError(e.message));
     if (page === "Audit trail")
       api<Audit[]>("/audit")
@@ -338,10 +362,14 @@ function App() {
     if (!selected) return;
     await act(async () => {
       setSelected(
-        await api<Ticket>(`/tickets/${selected.id}/decision`, "POST", {
-          allow,
-          version: selected.version,
-        }),
+        await api<Ticket>(
+          `/tickets/${selected.id}/${selected.status === "fallback_review" ? "fallback-decision" : "decision"}`,
+          "POST",
+          {
+            allow,
+            version: selected.version,
+          },
+        ),
       );
       setNotice(
         allow
@@ -357,8 +385,8 @@ function App() {
   const active = tickets.filter(
     (t) => !["resolved", "rejected"].includes(t.status),
   ).length;
-  const pending = tickets.filter(
-    (t) => t.status === "awaiting_approval",
+  const pending = tickets.filter((t) =>
+    ["awaiting_approval", "fallback_review"].includes(t.status),
   ).length;
   const available = engineers.filter(
     (e) => e.available && e.active_tickets < e.capacity,
@@ -372,10 +400,12 @@ function App() {
     { name: "Engineers", icon: Users },
     { name: "Incident library", icon: FileText },
     { name: "Audit trail", icon: ShieldCheck },
+    { name: "Operations", icon: Activity },
   ];
   function navActive(name: string) {
     if (name === "My work") return page === "Profile" && isSelf;
-    if (name === "Engineers") return page === "Engineers" || (page === "Profile" && !isSelf);
+    if (name === "Engineers")
+      return page === "Engineers" || (page === "Profile" && !isSelf);
     return page === name || (page === "Ticket detail" && name === home);
   }
   if (!auth)
@@ -480,7 +510,11 @@ function App() {
           </div>
           <div className="persona-switch">
             {personaOpen && (
-              <div className="persona-menu" role="listbox" aria-label="Choose a persona">
+              <div
+                className="persona-menu"
+                role="listbox"
+                aria-label="Choose a persona"
+              >
                 <div className="persona-menu-label">VIEW AS</div>
                 {people.map((x) => (
                   <button
@@ -845,9 +879,12 @@ function App() {
                       {selected.error}
                     </div>
                   )}
-                  {["new", "error", "manual_review"].includes(
-                    selected.status,
-                  ) && (
+                  {[
+                    "new",
+                    "error",
+                    "manual_review",
+                    "fallback_review",
+                  ].includes(selected.status) && (
                     <button
                       className="secondary"
                       disabled={busy || !status?.agent_ready}
@@ -908,53 +945,63 @@ function App() {
                       </div>
                     </>
                   )}
-                  {selected.status === "awaiting_approval" && !isManager && (
-                    <section className="approval waiting">
-                      <Clock3 size={24} />
-                      <div>
-                        <h3>Waiting on manager approval</h3>
-                        <p>
-                          ResolveMatch proposed{" "}
-                          {selected.recommendation?.primary?.name}. Only a
-                          manager can approve the assignment.
-                        </p>
-                      </div>
-                    </section>
-                  )}
-                  {selected.status === "awaiting_approval" && isManager && (
-                    <section className="approval">
-                      <ShieldCheck size={24} />
-                      <div>
-                        <h3>Ready for your review</h3>
-                        <p>
-                          Approve assignment to{" "}
-                          {selected.recommendation?.primary?.name}. Availability
-                          is checked again before assignment.
-                        </p>
-                      </div>
-                      <div className="approval-actions">
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() => decide(false)}
-                        >
-                          Reject
-                        </button>
-                        <button
-                          className="primary"
-                          disabled={busy}
-                          onClick={() => decide(true)}
-                        >
-                          {busy ? (
-                            <Loader2 className="spin" size={16} />
-                          ) : (
-                            <Check size={16} />
-                          )}
-                          Approve assignment
-                        </button>
-                      </div>
-                    </section>
-                  )}
+                  {["awaiting_approval", "fallback_review"].includes(
+                    selected.status,
+                  ) &&
+                    !isManager && (
+                      <section className="approval waiting">
+                        <Clock3 size={24} />
+                        <div>
+                          <h3>Waiting on manager approval</h3>
+                          <p>
+                            ResolveMatch proposed{" "}
+                            {selected.recommendation?.primary?.name}. Only a
+                            manager can approve the assignment.
+                          </p>
+                        </div>
+                      </section>
+                    )}
+                  {["awaiting_approval", "fallback_review"].includes(
+                    selected.status,
+                  ) &&
+                    isManager && (
+                      <section className="approval">
+                        <ShieldCheck size={24} />
+                        <div>
+                          <h3>
+                            {selected.status === "fallback_review"
+                              ? "Rules-only fallback — ready for your review"
+                              : "Ready for your review"}
+                          </h3>
+                          <p>
+                            Approve assignment to{" "}
+                            {selected.recommendation?.primary?.name}.
+                            Availability is checked again before assignment.
+                          </p>
+                        </div>
+                        <div className="approval-actions">
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() => decide(false)}
+                          >
+                            Reject
+                          </button>
+                          <button
+                            className="primary"
+                            disabled={busy}
+                            onClick={() => decide(true)}
+                          >
+                            {busy ? (
+                              <Loader2 className="spin" size={16} />
+                            ) : (
+                              <Check size={16} />
+                            )}
+                            Approve assignment
+                          </button>
+                        </div>
+                      </section>
+                    )}
                   {selected.assignment && (
                     <section className="assigned">
                       <CheckCircle2 />
@@ -972,24 +1019,83 @@ function App() {
                       {selected.status === "assigned" &&
                         (isManager ||
                           selected.assignment.engineer_id === persona?.id) && (
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() =>
-                            act(async () => {
-                              setSelected(
-                                await api<Ticket>(
-                                  `/tickets/${selected.id}/resolve`,
-                                  "POST",
-                                ),
-                              );
-                              await refresh();
-                            })
-                          }
-                        >
-                          Mark resolved
-                        </button>
-                      )}
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() =>
+                              act(async () => {
+                                setSelected(
+                                  await api<Ticket>(
+                                    `/tickets/${selected.id}/resolve`,
+                                    "POST",
+                                  ),
+                                );
+                                await refresh();
+                              })
+                            }
+                          >
+                            Mark resolved
+                          </button>
+                        )}
+                      {selected.status === "assigned" &&
+                        (isManager ||
+                          selected.assignment.engineer_id === persona?.id) && (
+                          <div className="reassign">
+                            <select
+                              value={reassignTo}
+                              onChange={(e) => setReassignTo(e.target.value)}
+                              aria-label="Reassign to"
+                            >
+                              <option value="">Reassign to…</option>
+                              {engineers
+                                .filter(
+                                  (e) =>
+                                    e.id !== selected.assignment?.engineer_id &&
+                                    (!selected.team ||
+                                      e.team === selected.team) &&
+                                    e.available &&
+                                    e.active_tickets < e.capacity,
+                                )
+                                .map((e) => (
+                                  <option key={e.id} value={e.id}>
+                                    {e.name} · {e.team} ({e.active_tickets}/
+                                    {e.capacity})
+                                  </option>
+                                ))}
+                            </select>
+                            <input
+                              placeholder="Reason (optional)"
+                              value={reassignReason}
+                              maxLength={300}
+                              onChange={(e) =>
+                                setReassignReason(e.target.value)
+                              }
+                            />
+                            <button
+                              className="secondary"
+                              disabled={busy || !reassignTo}
+                              onClick={() =>
+                                act(async () => {
+                                  setSelected(
+                                    await api<Ticket>(
+                                      `/tickets/${selected.id}/reassign`,
+                                      "POST",
+                                      {
+                                        engineer_id: reassignTo,
+                                        reason: reassignReason,
+                                      },
+                                    ),
+                                  );
+                                  setReassignTo("");
+                                  setReassignReason("");
+                                  await refresh();
+                                })
+                              }
+                            >
+                              Reassign
+                            </button>
+                          </div>
+                        )}
                     </section>
                   )}
                   {!!selected.recommendation?.incidents.length && (
@@ -1220,7 +1326,9 @@ function App() {
                   </p>
                 </div>
                 <div className="profile-flags">
-                  <Badge text={profile.available ? "Available" : "Unavailable"} />
+                  <Badge
+                    text={profile.available ? "Available" : "Unavailable"}
+                  />
                   {profile.on_call && <Badge text="On call" />}
                 </div>
               </div>
@@ -1319,80 +1427,90 @@ function App() {
                       <Settings2 size={18} />
                     </div>
                     <div className="panel-body">
-                    <div className="capacity-label">
-                      <span>Active workload</span>
-                      <strong>
-                        {profile.active_tickets} / {profile.capacity}
-                      </strong>
-                    </div>
-                    <div className="capacity-bar">
-                      <span
-                        style={{
-                          width:
-                            Math.min(
-                              100,
-                              (profile.active_tickets / profile.capacity) * 100,
-                            ) + "%",
-                        }}
-                      />
-                    </div>
-                    {isSelf || isManager ? (
-                      <>
-                        <div className="engineer-controls">
-                          <label>
-                            <input
-                              type="checkbox"
-                              checked={profile.available}
-                              disabled={busy}
-                              onChange={(event) =>
-                                act(async () => {
-                                  await api("/engineers/" + profile.id, "PATCH", {
-                                    available: event.target.checked,
-                                    on_call: profile.on_call,
-                                    capacity: profile.capacity,
-                                  });
-                                  await refresh();
-                                })
-                              }
-                            />
-                            Available for new work
-                          </label>
-                          <label>
-                            <input
-                              type="checkbox"
-                              checked={profile.on_call}
-                              disabled={busy}
-                              onChange={(event) =>
-                                act(async () => {
-                                  await api("/engineers/" + profile.id, "PATCH", {
-                                    available: profile.available,
-                                    on_call: event.target.checked,
-                                    capacity: profile.capacity,
-                                  });
-                                  await refresh();
-                                })
-                              }
-                            />
-                            On call
-                          </label>
-                        </div>
+                      <div className="capacity-label">
+                        <span>Active workload</span>
+                        <strong>
+                          {profile.active_tickets} / {profile.capacity}
+                        </strong>
+                      </div>
+                      <div className="capacity-bar">
+                        <span
+                          style={{
+                            width:
+                              Math.min(
+                                100,
+                                (profile.active_tickets / profile.capacity) *
+                                  100,
+                              ) + "%",
+                          }}
+                        />
+                      </div>
+                      {isSelf || isManager ? (
+                        <>
+                          <div className="engineer-controls">
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={profile.available}
+                                disabled={busy}
+                                onChange={(event) =>
+                                  act(async () => {
+                                    await api(
+                                      "/engineers/" + profile.id,
+                                      "PATCH",
+                                      {
+                                        available: event.target.checked,
+                                        on_call: profile.on_call,
+                                        capacity: profile.capacity,
+                                      },
+                                    );
+                                    await refresh();
+                                  })
+                                }
+                              />
+                              Available for new work
+                            </label>
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={profile.on_call}
+                                disabled={busy}
+                                onChange={(event) =>
+                                  act(async () => {
+                                    await api(
+                                      "/engineers/" + profile.id,
+                                      "PATCH",
+                                      {
+                                        available: profile.available,
+                                        on_call: event.target.checked,
+                                        capacity: profile.capacity,
+                                      },
+                                    );
+                                    await refresh();
+                                  })
+                                }
+                              />
+                              On call
+                            </label>
+                          </div>
+                          <p className="hint">
+                            Turning availability off excludes{" "}
+                            {isSelf ? "you" : profile.name.split(" ")[0]} from
+                            the next routing run. Tickets already assigned stay
+                            put.
+                          </p>
+                        </>
+                      ) : (
                         <p className="hint">
-                          Turning availability off excludes{" "}
-                          {isSelf ? "you" : profile.name.split(" ")[0]} from the
-                          next routing run. Tickets already assigned stay put.
+                          Only {profile.name.split(" ")[0]} or a manager can
+                          change this.
                         </p>
-                      </>
-                    ) : (
-                      <p className="hint">
-                        Only {profile.name.split(" ")[0]} or a manager can change
-                        this.
-                      </p>
-                    )}
-                    <div className="skills">
-                      {profile.skills.map((skill) => (
-                        <span key={skill}>{skill}</span>
-                      ))}
-                    </div>
+                      )}
+                      <div className="skills">
+                        {profile.skills.map((skill) => (
+                          <span key={skill}>{skill}</span>
+                        ))}
+                      </div>
                     </div>
                   </section>
                   <section className="panel evidence">
@@ -1423,7 +1541,9 @@ function App() {
                         </details>
                       ))
                     ) : (
-                      <p className="hint">No resolved incidents recorded yet.</p>
+                      <p className="hint">
+                        No resolved incidents recorded yet.
+                      </p>
                     )}
                     {history.length > 6 && (
                       <p className="hint">
@@ -1480,6 +1600,177 @@ function App() {
                       </div>
                     </details>
                   ))}
+              </section>
+            </>
+          )}
+          {page === "Operations" && ops && (
+            <>
+              <div className="page-heading">
+                <div>
+                  <div className="eyebrow">RELIABILITY</div>
+                  <h1>How the agent is behaving.</h1>
+                  <p>
+                    Computed from stored TrueForge run events and the audit
+                    trail. Token usage is shown as reported; no cost is
+                    estimated.
+                  </p>
+                </div>
+              </div>
+              <div className="metrics">
+                {[
+                  [
+                    "Agent runs",
+                    String(ops.runs.started ?? 0),
+                    `${ops.runs.model_calls ?? 0} model calls`,
+                  ],
+                  [
+                    "Avg run time",
+                    secs(ops.runs.avg_run_seconds),
+                    `Slowest ${secs(ops.runs.slowest_run_seconds)}`,
+                  ],
+                  [
+                    "Retries / fallbacks",
+                    `${ops.runs.retries ?? 0} / ${ops.runs.fallbacks ?? 0}`,
+                    `${ops.runs.failures ?? 0} hard failures`,
+                  ],
+                  [
+                    "Tokens",
+                    String((ops.tokens.input ?? 0) + (ops.tokens.output ?? 0)),
+                    `${ops.tokens.input ?? 0} in · ${ops.tokens.output ?? 0} out · ${ops.tokens.cached ?? 0} cached`,
+                  ],
+                ].map(([title, value, sub]) => (
+                  <section className="metric" key={title}>
+                    <div className="metric-title">{title}</div>
+                    <strong>{value}</strong>
+                    <small>{sub}</small>
+                  </section>
+                ))}
+              </div>
+              <section className="panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>Tool calls</h2>
+                    <p>MCP tools the agent used, and how long each took.</p>
+                  </div>
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>TOOL</th>
+                        <th>CALLS</th>
+                        <th>AVG LATENCY</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ops.tools.map((t) => (
+                        <tr key={t.name}>
+                          <td>
+                            <strong>{t.name}</strong>
+                          </td>
+                          <td>{t.calls}</td>
+                          <td>{secs(t.avg_seconds)}</td>
+                        </tr>
+                      ))}
+                      {!ops.tools.length && (
+                        <tr>
+                          <td colSpan={3}>No tool calls recorded yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              <section className="panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>Guardrails that fired</h2>
+                    <p>
+                      Times the system blocked or escalated instead of guessing.
+                    </p>
+                  </div>
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>GUARDRAIL</th>
+                        <th>COUNT</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ops.guardrails.map((g) => (
+                        <tr key={g.name}>
+                          <td>
+                            <strong>{g.name}</strong>
+                          </td>
+                          <td>{g.count}</td>
+                        </tr>
+                      ))}
+                      {!ops.guardrails.length && (
+                        <tr>
+                          <td colSpan={2}>Nothing blocked yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              <section className="panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>Failures, retries and fallbacks</h2>
+                    <p>
+                      {ops.approvals.approved} approved · {ops.approvals.denied}{" "}
+                      denied · {ops.approvals.reassigned} reassigned
+                    </p>
+                  </div>
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>EVENT</th>
+                        <th>TICKET</th>
+                        <th>CAUSE</th>
+                        <th>TIME</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ops.recent_failures.map((f, i) => (
+                        <tr key={i}>
+                          <td>
+                            <strong>{f.action.replace("routing.", "")}</strong>
+                          </td>
+                          <td>
+                            {f.ticket_id ? (
+                              <button
+                                className="text-button"
+                                onClick={() => open(f.ticket_id!)}
+                              >
+                                {f.ticket_id}
+                              </button>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td>
+                            {f.details.cause ||
+                              f.details.reason ||
+                              f.details.message ||
+                              "—"}
+                          </td>
+                          <td>{date(f.timestamp)}</td>
+                        </tr>
+                      ))}
+                      {!ops.recent_failures.length && (
+                        <tr>
+                          <td colSpan={4}>No failures recorded.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </section>
             </>
           )}

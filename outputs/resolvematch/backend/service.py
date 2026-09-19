@@ -133,3 +133,73 @@ def resolve(ticket_id, actor):
         )
         audit(c, actor, "ticket.resolved", ticket_id)
         return ticket_row(c, ticket_id)
+
+
+def reassign(ticket_id, to_engineer_id, actor, reason=""):
+    """Hand an assigned ticket to another engineer through the same guardrails as assign()."""
+    with db(True) as c:
+        ticket = ticket_row(c, ticket_id)
+        current = ticket["assignment"]
+        if ticket["status"] != "assigned" or not current:
+            raise ValueError("Only assigned tickets can be reassigned")
+        if current["engineer_id"] == to_engineer_id:
+            raise ValueError("Ticket is already assigned to this engineer")
+        target = next((e for e in engineer_rows(c) if e["id"] == to_engineer_id), None)
+        if not target:
+            raise ValueError("Engineer not found")
+        if ticket["team"] and target["team"] != ticket["team"]:
+            raise ValueError(
+                target["name"] + " is not on the owning team (" + ticket["team"] + ")"
+            )
+        if not target["available"]:
+            raise ValueError(target["name"] + " is unavailable")
+        if target["active_tickets"] >= target["capacity"]:
+            raise ValueError(target["name"] + " is at capacity")
+        c.execute(
+            "UPDATE assignments SET engineer_id=?,assigned_at=? WHERE ticket_id=?",
+            (to_engineer_id, now(), ticket_id),
+        )
+        c.execute("UPDATE tickets SET updated_at=? WHERE id=?", (now(), ticket_id))
+        audit(
+            c,
+            actor,
+            "ticket.reassigned",
+            ticket_id,
+            {
+                "from": current["engineer_id"],
+                "to": to_engineer_id,
+                "reason": reason.strip()[:300],
+            },
+        )
+        return ticket_row(c, ticket_id)
+
+
+def decide_fallback(ticket_id, allow, version, actor):
+    """Human decision on a rules-only recommendation, using the same approval and assign guardrails."""
+    with db(True) as c:
+        t = ticket_row(c, ticket_id)
+        if t["status"] != "fallback_review" or t["version"] != version:
+            raise ValueError(
+                "Recommendation changed or was already reviewed. Refresh this ticket."
+            )
+        rec = t["recommendation"]
+        if not rec or rec["manual_review"] or not rec.get("primary"):
+            raise ValueError("No actionable recommendation to approve")
+        engineer_id = rec["primary"]["id"]
+        if not allow:
+            c.execute("DELETE FROM approvals WHERE ticket_id=?", (ticket_id,))
+            c.execute(
+                "UPDATE tickets SET status='rejected',updated_at=? WHERE id=?",
+                (now(), ticket_id),
+            )
+            audit(c, actor, "assignment.denied", ticket_id, {"fallback": True})
+            return ticket_row(c, ticket_id)
+        t["status"] = "awaiting_approval"
+        grant(c, t, engineer_id, actor)
+        c.execute(
+            "UPDATE tickets SET status='approving',updated_at=? WHERE id=?",
+            (now(), ticket_id),
+        )
+    assign(ticket_id, engineer_id)
+    with db() as c:
+        return ticket_row(c, ticket_id)

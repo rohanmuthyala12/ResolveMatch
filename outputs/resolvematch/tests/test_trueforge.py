@@ -145,4 +145,85 @@ async def test_provider_401_has_actionable_error(monkeypatch):
     monkeypatch.setattr(trueforge, "request", failed)
     result = await trueforge.sync(t["id"])
     assert "Replace it in Settings" in result["error"]
-    assert result["status"] == "error"
+    assert result["status"] in ("fallback_review", "manual_review")
+    assert result["attempts"] == 0
+
+
+DB_TICKET = (
+    "Databricks schema mismatch",
+    "Databricks customer ETL pipeline ingestion CUSTOMER_ID type mismatch after schema change",
+    "High",
+    "Data Platform",
+)
+
+
+@pytest.mark.asyncio
+async def test_forge_down_falls_back_to_rules_only_with_human_approval(monkeypatch):
+    t = service.create_ticket(*DB_TICKET)
+
+    async def down(method, path, payload=None):
+        raise trueforge.ForgeError("Cannot reach TrueForge.")
+
+    monkeypatch.setattr(trueforge, "request", down)
+    await trueforge.start(t["id"])
+    with db() as c:
+        r = ticket_row(c, t["id"])
+        actions = [x["action"] for x in c.execute("SELECT action FROM audit WHERE ticket_id=?", (t["id"],))]
+    assert r["attempts"] == 1
+    assert r["status"] == "fallback_review"
+    assert r["recommendation"]["fallback"] is True
+    assert "routing.retry" in actions and "routing.fallback" in actions
+    assert not r["assignment"]  # nothing is assigned without approval
+    done = service.decide_fallback(t["id"], True, r["version"], "Dana Whitfield (Manager)")
+    assert done["status"] == "assigned"
+    assert done["assignment"]["engineer_id"] == r["recommendation"]["primary"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_retry_succeeds_without_fallback(monkeypatch):
+    t = service.create_ticket(*DB_TICKET)
+    calls = {"n": 0}
+
+    async def flaky(method, path, payload=None):
+        if path == "/sessions":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise trueforge.ForgeError("temporary failure")
+            return {"data": {"id": "s1"}}
+        return {"data": {"id": "turn1"}}
+
+    monkeypatch.setattr(trueforge, "request", flaky)
+    await trueforge.start(t["id"])
+    with db() as c:
+        r = ticket_row(c, t["id"])
+    assert r["status"] == "routing" and r["attempts"] == 1 and r["turn_id"] == "turn1"
+
+
+@pytest.mark.asyncio
+async def test_fallback_rejection_assigns_nothing(monkeypatch):
+    t = service.create_ticket(*DB_TICKET)
+
+    async def down(method, path, payload=None):
+        raise trueforge.ForgeError("Cannot reach TrueForge.")
+
+    monkeypatch.setattr(trueforge, "request", down)
+    await trueforge.start(t["id"])
+    with db() as c:
+        version = ticket_row(c, t["id"])["version"]
+    r = service.decide_fallback(t["id"], False, version, "Dana Whitfield (Manager)")
+    assert r["status"] == "rejected" and r["assignment"] is None
+
+
+@pytest.mark.asyncio
+async def test_hourly_run_budget_blocks_extra_runs(monkeypatch):
+    monkeypatch.setattr(config, "RUNS_PER_HOUR", 1)
+    a = service.create_ticket(*DB_TICKET)
+    b = service.create_ticket(*DB_TICKET)
+
+    async def ok(method, path, payload=None):
+        return {"data": {"id": "s1"}}
+
+    monkeypatch.setattr(trueforge, "request", ok)
+    await trueforge.start(a["id"])
+    with pytest.raises(ValueError, match="budget"):
+        await trueforge.start(b["id"])
