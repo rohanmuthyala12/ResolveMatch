@@ -33,6 +33,9 @@ The agent interprets a ticket and retrieves evidence. Python ranks eligible engi
 - Primary and eligible backup; no fabricated backup when only one engineer qualifies.
 - TrueForge run/session persistence, actual tool events, bounded execution, provider errors.
 - Human approve/reject, server-side expiring approval, revalidation and duplicate protection.
+- Manager and engineer views behind a persona switcher: the manager files and approves, each
+  engineer gets a profile with their assigned queue, their own availability controls, and the
+  resolved incidents behind their score.
 - Team availability and on-call controls, live assignment workload, incident resolution.
 - Searchable incident library and persistent audit trail.
 - Input validation, parameterized SQL, separate MCP authentication, same-origin write protection, optional password sessions, security headers.
@@ -49,6 +52,7 @@ backend/
   store.py            Schema and database access
   trueforge.py        Harness API adapter and approval events
   setup_trueforge.py  Connector and saved-agent configuration
+  personas.py         Demo manager/engineer identities for the switcher
   seed.py             Explicit synthetic seed data
   data_cli.py         Import, export, backup
 frontend/src/         React dashboard and responsive styles
@@ -62,7 +66,7 @@ Ranking uses weighted keyword overlap so results are reproducible and inspectabl
 
 Availability and capacity are hard requirements. Team can be supplied by the operator or inferred only when retrieved evidence has a clear leading team. An engineer without relevant resolved incidents cannot become the primary solely from a skills label. Historical expertise and skills can be correlated; weights need evaluation on real data.
 
-The application supports one local operator, one server process, and one workspace. The audit trail records `operator`, `agent`, and `system`, not enterprise identities. Data is persisted on disk and recoverable across restarts. It is not a multi-tenant SaaS service.
+The application supports one local operator, one server process, and one workspace. The persona switcher is a demo affordance, not authentication: anyone with dashboard access can act as any persona, so the audit trail records the selected persona's name as a label rather than a verified enterprise identity. Data is persisted on disk and recoverable across restarts. It is not a multi-tenant SaaS service.
 
 There is no external Jira/ServiceNow mutation, automated remediation, vector service, or custom model training. The delivered assignment lifecycle is fully functional inside ResolveMatch's database.
 

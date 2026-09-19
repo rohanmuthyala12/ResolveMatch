@@ -106,6 +106,29 @@ type Audit = {
   details: string;
 };
 
+type Persona = {
+  id: string;
+  name: string;
+  role: string;
+  team: string;
+  title: string;
+};
+type QueueItem = {
+  id: string;
+  title: string;
+  severity: string;
+  team: string;
+  status: string;
+  created_at: string;
+  assigned_at: string;
+  completed_at: string | null;
+  approved_by: string;
+};
+
+// Demo persona the requests are made as. Not a credential: the backend treats
+// it as a label for the audit trail and falls back to "operator" if unknown.
+let actingAs = "";
+
 async function api<T>(
   path: string,
   method = "GET",
@@ -113,7 +136,11 @@ async function api<T>(
 ): Promise<T> {
   const res = await fetch("/api" + path, {
     method,
-    headers: { "Content-Type": "application/json", "X-ResolveMatch": "1" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-ResolveMatch": "1",
+      ...(actingAs ? { "X-RM-Actor": actingAs } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json();
@@ -172,6 +199,14 @@ function App() {
     team: "",
   });
   const [notice, setNotice] = useState("");
+  const [people, setPeople] = useState<Persona[]>([]),
+    [persona, setPersona] = useState<Persona | null>(null),
+    [personaOpen, setPersonaOpen] = useState(false),
+    [profileId, setProfileId] = useState(""),
+    [queue, setQueue] = useState<QueueItem[]>([]),
+    [myQueue, setMyQueue] = useState<QueueItem[]>([]),
+    [history, setHistory] = useState<Incident[]>([]);
+  const isManager = persona?.role !== "engineer";
   async function refresh() {
     const [t, e, s] = await Promise.all([
       api<Ticket[]>("/tickets"),
@@ -212,6 +247,59 @@ function App() {
         .then(setAudits)
         .catch((e) => setError(e.message));
   }, [page, auth?.authenticated]);
+  useEffect(() => {
+    if (!auth?.authenticated) return;
+    api<Persona[]>("/personas")
+      .then((list) => {
+        setPeople(list);
+        const stored = localStorage.getItem("rm_persona");
+        const found = list.find((x) => x.id === stored) || list[0];
+        if (found) {
+          actingAs = found.id;
+          setPersona(found);
+          if (found.role === "engineer") {
+            setProfileId(found.id);
+            setPage("Profile");
+          }
+        }
+      })
+      .catch((e) => setError(e.message));
+  }, [auth?.authenticated]);
+  useEffect(() => {
+    if (!auth?.authenticated || page !== "Profile" || !profileId) return;
+    Promise.all([
+      api<QueueItem[]>(`/engineers/${profileId}/queue`),
+      api<Incident[]>(`/engineers/${profileId}/history`),
+    ])
+      .then(([q, h]) => {
+        setQueue(q);
+        setHistory(h);
+      })
+      .catch((e) => setError(e.message));
+  }, [page, profileId, auth?.authenticated, tickets]);
+  useEffect(() => {
+    if (!auth?.authenticated || persona?.role !== "engineer") {
+      setMyQueue([]);
+      return;
+    }
+    api<QueueItem[]>(`/engineers/${persona.id}/queue`)
+      .then(setMyQueue)
+      .catch(() => {});
+  }, [auth?.authenticated, persona?.id, tickets]);
+  function switchPersona(next: Persona) {
+    actingAs = next.id;
+    localStorage.setItem("rm_persona", next.id);
+    setPersona(next);
+    setPersonaOpen(false);
+    setSelected(null);
+    setQuery("");
+    setError("");
+    setNotice("");
+    if (next.role === "engineer") {
+      setProfileId(next.id);
+      setPage("Profile");
+    } else setPage("Overview");
+  }
   async function act(fn: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -275,12 +363,21 @@ function App() {
   const available = engineers.filter(
     (e) => e.available && e.active_tickets < e.capacity,
   ).length;
+  const home = isManager ? "Overview" : "My work";
+  const myOpen = myQueue.filter((q) => !q.completed_at).length;
+  const profile = engineers.find((e) => e.id === profileId) || null;
+  const isSelf = !!profile && profile.id === persona?.id;
   const nav = [
-    { name: "Overview", icon: Layers3 },
+    { name: home, icon: Layers3 },
     { name: "Engineers", icon: Users },
     { name: "Incident library", icon: FileText },
     { name: "Audit trail", icon: ShieldCheck },
   ];
+  function navActive(name: string) {
+    if (name === "My work") return page === "Profile" && isSelf;
+    if (name === "Engineers") return page === "Engineers" || (page === "Profile" && !isSelf);
+    return page === name || (page === "Ticket detail" && name === home);
+  }
   if (!auth)
     return (
       <div className="loading">
@@ -330,7 +427,11 @@ function App() {
           href="#"
           onClick={(e) => {
             e.preventDefault();
-            setPage("Overview");
+            if (isManager) setPage("Overview");
+            else {
+              setProfileId(persona?.id || "");
+              setPage("Profile");
+            }
           }}
         >
           <span className="brand-icon">
@@ -350,21 +451,22 @@ function App() {
           {nav.map((n) => (
             <button
               key={n.name}
-              className={
-                page === n.name ||
-                (page === "Ticket detail" && n.name === "Overview")
-                  ? "active"
-                  : ""
-              }
+              className={navActive(n.name) ? "active" : ""}
               onClick={() => {
-                setPage(n.name);
                 setQuery("");
+                if (n.name === "My work") {
+                  setProfileId(persona?.id || "");
+                  setPage("Profile");
+                } else setPage(n.name);
               }}
             >
               <n.icon size={18} />
               {n.name}
               {n.name === "Overview" && pending > 0 && (
                 <span className="count">{pending}</span>
+              )}
+              {n.name === "My work" && myOpen > 0 && (
+                <span className="count">{myOpen}</span>
               )}
             </button>
           ))}
@@ -376,25 +478,70 @@ function App() {
               Powered by TrueForge<small>Evidence. Decisions. Oversight.</small>
             </div>
           </div>
-          <div className="operator">
-            <span className="avatar">OP</span>
-            <div>
-              Workspace operator
-              <small>{status?.authentication || "Local workspace"}</small>
-            </div>
-            {auth.required && (
-              <button
-                aria-label="Sign out"
-                onClick={() =>
-                  act(async () => {
-                    await api("/logout", "POST");
-                    setAuth({ required: true, authenticated: false });
-                  })
-                }
-              >
-                <LogOut size={16} />
-              </button>
+          <div className="persona-switch">
+            {personaOpen && (
+              <div className="persona-menu" role="listbox" aria-label="Choose a persona">
+                <div className="persona-menu-label">VIEW AS</div>
+                {people.map((x) => (
+                  <button
+                    key={x.id}
+                    role="option"
+                    aria-label={x.name + " · " + x.title}
+                    aria-selected={x.id === persona?.id}
+                    className={x.id === persona?.id ? "active" : ""}
+                    onClick={() => switchPersona(x)}
+                  >
+                    <span className="avatar">{initials(x.name)}</span>
+                    <div>
+                      {x.name}
+                      <small>{x.title}</small>
+                    </div>
+                    {x.id === persona?.id && <Check size={14} />}
+                  </button>
+                ))}
+                <p className="persona-note">
+                  Demo persona switcher, not a login. Every action is recorded
+                  against the selected name.
+                </p>
+              </div>
             )}
+            <div className="operator">
+              <button
+                className="persona-current"
+                aria-haspopup="listbox"
+                aria-expanded={personaOpen}
+                onClick={() => setPersonaOpen(!personaOpen)}
+              >
+                <span className="avatar">
+                  {initials(persona?.name || "Workspace Operator")}
+                </span>
+                <div>
+                  {persona?.name || "Workspace operator"}
+                  <small>
+                    {persona?.title ||
+                      status?.authentication ||
+                      "Local workspace"}
+                  </small>
+                </div>
+                <ChevronRight
+                  size={15}
+                  className={personaOpen ? "caret open" : "caret"}
+                />
+              </button>
+              {auth.required && (
+                <button
+                  aria-label="Sign out"
+                  onClick={() =>
+                    act(async () => {
+                      await api("/logout", "POST");
+                      setAuth({ required: true, authenticated: false });
+                    })
+                  }
+                >
+                  <LogOut size={16} />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </aside>
@@ -403,7 +550,13 @@ function App() {
           <div className="breadcrumb">
             Workspace <ChevronRight size={14} />
             <strong>
-              {page === "Ticket detail" ? "Incident review" : page}
+              {page === "Ticket detail"
+                ? "Incident review"
+                : page === "Profile"
+                  ? isSelf
+                    ? "My work"
+                    : "Engineer profile"
+                  : page}
             </strong>
           </div>
           <div className="header-right">
@@ -413,7 +566,9 @@ function App() {
               <i />
               {status?.agent_ready ? "Agent connected" : "Setup required"}
             </span>
-            <span className="avatar small">OP</span>
+            <span className="avatar small">
+              {initials(persona?.name || "Workspace Operator")}
+            </span>
           </div>
         </header>
         <main>
@@ -457,10 +612,12 @@ function App() {
                     Route with evidence, balance your team, and stay in control.
                   </p>
                 </div>
-                <button className="primary" onClick={() => setModal(true)}>
-                  <Plus size={17} />
-                  New incident
-                </button>
+                {isManager && (
+                  <button className="primary" onClick={() => setModal(true)}>
+                    <Plus size={17} />
+                    New incident
+                  </button>
+                )}
               </div>
               <div className="metrics">
                 <Metric
@@ -565,12 +722,14 @@ function App() {
                         <br />
                         and the engineer best placed to help.
                       </p>
-                      <button
-                        className="secondary"
-                        onClick={() => setModal(true)}
-                      >
-                        Create an incident <ArrowRight size={16} />
-                      </button>
+                      {isManager && (
+                        <button
+                          className="secondary"
+                          onClick={() => setModal(true)}
+                        >
+                          Create an incident <ArrowRight size={16} />
+                        </button>
+                      )}
                     </div>
                   )}
                 </section>
@@ -636,7 +795,7 @@ function App() {
             <>
               <button
                 className="text-button back"
-                onClick={() => setPage("Overview")}
+                onClick={() => setPage(isManager ? "Overview" : "Profile")}
               >
                 ← Back to incident queue
               </button>
@@ -749,7 +908,20 @@ function App() {
                       </div>
                     </>
                   )}
-                  {selected.status === "awaiting_approval" && (
+                  {selected.status === "awaiting_approval" && !isManager && (
+                    <section className="approval waiting">
+                      <Clock3 size={24} />
+                      <div>
+                        <h3>Waiting on manager approval</h3>
+                        <p>
+                          ResolveMatch proposed{" "}
+                          {selected.recommendation?.primary?.name}. Only a
+                          manager can approve the assignment.
+                        </p>
+                      </div>
+                    </section>
+                  )}
+                  {selected.status === "awaiting_approval" && isManager && (
                     <section className="approval">
                       <ShieldCheck size={24} />
                       <div>
@@ -797,7 +969,9 @@ function App() {
                           {date(selected.assignment.assigned_at)}.
                         </p>
                       </div>
-                      {selected.status === "assigned" && (
+                      {selected.status === "assigned" &&
+                        (isManager ||
+                          selected.assignment.engineer_id === persona?.id) && (
                         <button
                           className="secondary"
                           disabled={busy}
@@ -964,7 +1138,10 @@ function App() {
                         }}
                       />
                     </div>
-                    <div className="engineer-controls">
+                    <div
+                      className="engineer-controls"
+                      hidden={!isManager && e.id !== persona?.id}
+                    >
                       <label>
                         <input
                           type="checkbox"
@@ -1006,8 +1183,255 @@ function App() {
                       {e.resolved_count} resolved incidents in the knowledge
                       base
                     </small>
+                    <button
+                      className="text-button"
+                      onClick={() => {
+                        setProfileId(e.id);
+                        setPage("Profile");
+                      }}
+                    >
+                      {e.id === persona?.id ? "My profile" : "View profile"}
+                      <ArrowUpRight size={14} />
+                    </button>
                   </section>
                 ))}
+              </div>
+            </>
+          )}
+          {page === "Profile" && profile && (
+            <>
+              {!isSelf && (
+                <button
+                  className="text-button back"
+                  onClick={() => setPage("Engineers")}
+                >
+                  ← Back to engineers
+                </button>
+              )}
+              <div className="page-heading">
+                <div>
+                  <div className="eyebrow">
+                    {isSelf ? "MY WORKSPACE" : "ENGINEER PROFILE"}
+                  </div>
+                  <h1>{profile.name}</h1>
+                  <p>
+                    {profile.team} · {profile.resolved_count} resolved incidents
+                    in the knowledge base
+                  </p>
+                </div>
+                <div className="profile-flags">
+                  <Badge text={profile.available ? "Available" : "Unavailable"} />
+                  {profile.on_call && <Badge text="On call" />}
+                </div>
+              </div>
+              <div className="metrics three">
+                <Metric
+                  title="Assigned now"
+                  value={queue.filter((q) => !q.completed_at).length}
+                  sub={isSelf ? "Waiting on you" : "Currently open"}
+                  icon={<Layers3 size={19} />}
+                />
+                <Metric
+                  title="Remaining capacity"
+                  value={Math.max(0, profile.capacity - profile.active_tickets)}
+                  sub={`${profile.active_tickets} of ${profile.capacity} in use`}
+                  icon={<Activity size={19} />}
+                />
+                <Metric
+                  title="Resolved history"
+                  value={history.length}
+                  sub="The evidence behind the score"
+                  icon={<GitBranch size={19} />}
+                />
+              </div>
+              <div className="overview-grid profile-grid">
+                <section className="panel queue">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>
+                        {isSelf ? "Assigned to me" : "Assigned tickets"}{" "}
+                        <span className="number">{queue.length}</span>
+                      </h2>
+                      <p>Routed here after a human approved the assignment.</p>
+                    </div>
+                    <Layers3 size={18} />
+                  </div>
+                  {queue.length ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Incident</th>
+                            <th>Severity</th>
+                            <th>Status</th>
+                            <th />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {queue.map((q) => (
+                            <tr key={q.id} onClick={() => open(q.id)}>
+                              <td>
+                                <button
+                                  className="row-link"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    open(q.id);
+                                  }}
+                                >
+                                  {q.title}
+                                </button>
+                                <small>
+                                  {q.id} · assigned {date(q.assigned_at)}
+                                </small>
+                              </td>
+                              <td>
+                                <Badge text={q.severity} />
+                              </td>
+                              <td>
+                                <Badge text={q.status} />
+                              </td>
+                              <td>
+                                <ArrowUpRight size={17} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="empty">
+                      <div className="empty-art">
+                        <CircleDot size={32} />
+                      </div>
+                      <h3>Nothing assigned yet</h3>
+                      <p>
+                        {isSelf
+                          ? "Approved assignments land here."
+                          : "This engineer holds no tickets right now."}
+                      </p>
+                    </div>
+                  )}
+                </section>
+                <aside className="profile-column">
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <h2>Availability</h2>
+                      <Settings2 size={18} />
+                    </div>
+                    <div className="panel-body">
+                    <div className="capacity-label">
+                      <span>Active workload</span>
+                      <strong>
+                        {profile.active_tickets} / {profile.capacity}
+                      </strong>
+                    </div>
+                    <div className="capacity-bar">
+                      <span
+                        style={{
+                          width:
+                            Math.min(
+                              100,
+                              (profile.active_tickets / profile.capacity) * 100,
+                            ) + "%",
+                        }}
+                      />
+                    </div>
+                    {isSelf || isManager ? (
+                      <>
+                        <div className="engineer-controls">
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={profile.available}
+                              disabled={busy}
+                              onChange={(event) =>
+                                act(async () => {
+                                  await api("/engineers/" + profile.id, "PATCH", {
+                                    available: event.target.checked,
+                                    on_call: profile.on_call,
+                                    capacity: profile.capacity,
+                                  });
+                                  await refresh();
+                                })
+                              }
+                            />
+                            Available for new work
+                          </label>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={profile.on_call}
+                              disabled={busy}
+                              onChange={(event) =>
+                                act(async () => {
+                                  await api("/engineers/" + profile.id, "PATCH", {
+                                    available: profile.available,
+                                    on_call: event.target.checked,
+                                    capacity: profile.capacity,
+                                  });
+                                  await refresh();
+                                })
+                              }
+                            />
+                            On call
+                          </label>
+                        </div>
+                        <p className="hint">
+                          Turning availability off excludes{" "}
+                          {isSelf ? "you" : profile.name.split(" ")[0]} from the
+                          next routing run. Tickets already assigned stay put.
+                        </p>
+                      </>
+                    ) : (
+                      <p className="hint">
+                        Only {profile.name.split(" ")[0]} or a manager can change
+                        this.
+                      </p>
+                    )}
+                    <div className="skills">
+                      {profile.skills.map((skill) => (
+                        <span key={skill}>{skill}</span>
+                      ))}
+                    </div>
+                    </div>
+                  </section>
+                  <section className="panel evidence">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Resolved history</h2>
+                        <p>What this engineer has actually fixed.</p>
+                      </div>
+                      <GitBranch size={18} />
+                    </div>
+                    {history.length ? (
+                      history.slice(0, 6).map((i, index) => (
+                        <details key={i.id} open={index === 0}>
+                          <summary>
+                            <span className="evidence-id">{i.id}</span>
+                            <span>{i.title}</span>
+                            <ChevronRight size={15} />
+                          </summary>
+                          <div className="evidence-body">
+                            <span className="evidence-meta">
+                              {i.component} · {i.severity}
+                            </span>
+                            <h4>Root cause</h4>
+                            <p>{i.root_cause}</p>
+                            <h4>Resolution</h4>
+                            <p>{i.resolution}</p>
+                          </div>
+                        </details>
+                      ))
+                    ) : (
+                      <p className="hint">No resolved incidents recorded yet.</p>
+                    )}
+                    {history.length > 6 && (
+                      <p className="hint">
+                        Showing 6 of {history.length} resolved incidents.
+                      </p>
+                    )}
+                  </section>
+                </aside>
               </div>
             </>
           )}

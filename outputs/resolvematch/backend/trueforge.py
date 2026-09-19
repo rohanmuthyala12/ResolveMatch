@@ -57,7 +57,7 @@ async def connection_status():
         }
 
 
-async def start(ticket_id):
+async def start(ticket_id, actor="operator"):
     with db(True) as c:
         t = ticket_row(c, ticket_id)
         if t["status"] not in ("new", "error", "manual_review"):
@@ -67,7 +67,7 @@ async def start(ticket_id):
             (time.time(), ticket_id),
         )
         c.execute("DELETE FROM approvals WHERE ticket_id=?", (ticket_id,))
-        audit(c, "operator", "routing.started", ticket_id)
+        audit(c, actor, "routing.started", ticket_id)
     try:
         session = (
             await request("POST", "/sessions", {"agent": {"name": config.AGENT_NAME}})

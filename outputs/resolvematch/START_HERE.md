@@ -26,6 +26,19 @@ Use this incident for the presentation:
 
 Set the owning team to **Data Platform**, severity **High**. The result is calculated from current data, so scores may change when workload or availability changes.
 
+## Manager and engineer views
+
+The bottom-left card in the sidebar is a persona switcher. It offers **Dana Whitfield (Engineering Manager)** plus every engineer in the dataset, and the choice is remembered in the browser.
+
+- **Manager** sees the full incident queue, files new incidents, and is the only persona shown the approve/reject controls.
+- **An engineer** gets **My work**: the tickets assigned to them, their own availability and on-call switches, and the resolved incidents that back their routing score. They can open any colleague's profile from **Engineers**, read-only.
+
+Every write records the selected persona in the audit trail, so the log reads `Dana Whitfield (Manager)` and `Kevin Shah (ENG-001)` instead of `operator`.
+
+This is a demo affordance, not a login: anyone using the dashboard can select any persona, and the server treats the choice as a label rather than a permission. Say so when you demo it. `SECURITY.md` records what real deployment would require.
+
+A useful demo beat: when an engineer turns off **Available for new work**, the next routing run excludes them with the reason `Unavailable` and promotes the backup — the handoff runs through the ranking engine rather than around it.
+
 ## Start again after closing the app
 
 Open a terminal in this `resolvematch` folder. Python 3.13 and Node 24 were used for validation.

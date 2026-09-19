@@ -156,3 +156,61 @@ def test_password_session(client, monkeypatch):
     assert client.get("/api/tickets").status_code == 200
     client.post("/api/logout", headers=HEAD)
     assert client.get("/api/tickets").status_code == 401
+
+
+def test_personas_offer_manager_and_every_engineer(client):
+    people = client.get("/api/personas").json()
+    assert people[0]["id"] == "MGR-001" and people[0]["role"] == "manager"
+    engineers = client.get("/api/engineers").json()
+    assert {p["id"] for p in people if p["role"] == "engineer"} == {
+        e["id"] for e in engineers
+    }
+
+
+def test_engineer_history_returns_only_their_resolved_incidents(client):
+    history = client.get("/api/engineers/ENG-001/history").json()
+    assert history and all(i["resolved_by"] == "ENG-001" for i in history)
+    assert client.get("/api/engineers/ENG-999/history").status_code == 404
+
+
+def test_engineer_queue_lists_assigned_tickets(client, monkeypatch):
+    t, rec = pending(client)
+
+    async def resume(*args):
+        pass
+
+    monkeypatch.setattr(trueforge, "resume", resume)
+    client.post(
+        "/api/tickets/" + t["id"] + "/decision",
+        headers=HEAD,
+        json={"allow": True, "version": rec["version"]},
+    )
+    service.assign(t["id"], rec["primary"]["id"])
+    queue = client.get("/api/engineers/" + rec["primary"]["id"] + "/queue").json()
+    assert [q["id"] for q in queue] == [t["id"]]
+    assert queue[0]["completed_at"] is None
+    assert client.get("/api/engineers/ENG-999/queue").status_code == 404
+
+
+def test_persona_header_names_the_audit_trail(client):
+    client.post(
+        "/api/tickets",
+        headers={**HEAD, "X-RM-Actor": "MGR-001"},
+        json={
+            "title": "Kafka consumer lag spike",
+            "description": "Consumer group lag climbing after the latest broker rollout",
+        },
+    )
+    assert client.get("/api/audit").json()[0]["actor"] == "Dana Whitfield (Manager)"
+
+
+def test_unknown_persona_falls_back_to_operator(client):
+    client.post(
+        "/api/tickets",
+        headers={**HEAD, "X-RM-Actor": "ENG-does-not-exist"},
+        json={
+            "title": "Snowflake warehouse suspended",
+            "description": "Reporting warehouse suspends mid-query and dashboards time out",
+        },
+    )
+    assert client.get("/api/audit").json()[0]["actor"] == "operator"

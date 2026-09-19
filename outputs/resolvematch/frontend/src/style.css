@@ -1475,3 +1475,138 @@ details[open] summary > svg {
     scroll-behavior: auto !important;
   }
 }
+
+/* Persona switcher — demo identity, not authentication. */
+.persona-switch {
+  position: relative;
+}
+.persona-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin-bottom: 9px;
+  padding: 7px;
+  max-height: 336px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e3e8e3;
+  border-radius: 10px;
+  box-shadow: 0 14px 34px rgba(31, 46, 34, 0.14);
+}
+.persona-menu-label {
+  padding: 6px 8px;
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  color: #8a9a8c;
+}
+.persona-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.persona-menu button:hover {
+  background: #f2f5ef;
+}
+.persona-menu button.active {
+  background: #edf2e5;
+}
+.persona-menu button small {
+  display: block;
+  margin-top: 3px;
+  font-size: 9px;
+  color: #7c8c7e;
+}
+.persona-menu .avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 10px;
+}
+.persona-note {
+  margin: 7px 0 0;
+  padding: 9px 8px 3px;
+  border-top: 1px solid #edf0ed;
+  font-size: 9px;
+  line-height: 1.6;
+  color: #8a9a8c;
+}
+.persona-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.persona-current .caret {
+  margin-left: auto;
+  color: #9aa89b;
+  transition: transform 0.15s ease;
+}
+.persona-current .caret.open {
+  transform: rotate(90deg);
+}
+
+/* Engineer profile */
+.profile-flags {
+  display: flex;
+  gap: 8px;
+}
+.hint {
+  margin: 13px 0 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: #7c8c7e;
+}
+.engineer-tile .text-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 13px;
+}
+.approval.waiting {
+  background: #f4f6f2;
+  border-color: #e4e9e2;
+}
+.profile-column {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-self: start;
+}
+.profile-column .panel-body {
+  padding: 0 22px 22px;
+}
+.metrics.three {
+  grid-template-columns: repeat(3, 1fr);
+}
+@media (max-width: 950px) {
+  .metrics.three {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.profile-grid {
+  align-items: start;
+}
+/* .engineer-controls sets display:flex, which would otherwise beat [hidden]. */
+.engineer-controls[hidden] {
+  display: none;
+}
+.engineer-tile > small {
+  display: block;
+}

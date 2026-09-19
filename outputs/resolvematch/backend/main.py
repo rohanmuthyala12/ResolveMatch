@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import config, service, trueforge
+from . import config, personas, service, trueforge
 from .store import audit, db, engineer_rows, initialize, now, ticket_row
 from .tools import mcp
 
@@ -152,6 +152,15 @@ async def forge_error(request, exc):
     return JSONResponse({"detail": str(exc)}, status_code=502)
 
 
+def actor(request: Request) -> str:
+    """Resolve the X-RM-Actor persona header to an audit label."""
+    persona = request.headers.get("x-rm-actor", "")
+    if not persona or len(persona) > 40:
+        return personas.FALLBACK
+    with db() as c:
+        return personas.actor_label(c, persona)
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -237,7 +246,8 @@ def engineers():
 
 
 @app.patch("/api/engineers/{engineer_id}")
-def update_engineer(engineer_id: str, body: EngineerUpdate):
+def update_engineer(engineer_id: str, body: EngineerUpdate, request: Request):
+    who = actor(request)
     with db(True) as c:
         result = c.execute(
             "UPDATE engineers SET available=?,on_call=?,capacity=? WHERE id=?",
@@ -247,11 +257,55 @@ def update_engineer(engineer_id: str, body: EngineerUpdate):
             raise HTTPException(404, "Engineer not found")
         audit(
             c,
-            "operator",
+            who,
             "engineer.updated",
             details={"engineer_id": engineer_id, **body.model_dump()},
         )
     return {"ok": True}
+
+
+@app.get("/api/personas")
+def persona_list():
+    with db() as c:
+        return personas.personas(c)
+
+
+@app.get("/api/engineers/{engineer_id}/queue")
+def engineer_queue(engineer_id: str):
+    """Tickets assigned to one engineer, newest first."""
+    with db() as c:
+        if not c.execute(
+            "SELECT 1 FROM engineers WHERE id=?", (engineer_id,)
+        ).fetchone():
+            raise HTTPException(404, "Engineer not found")
+        return [
+            dict(r)
+            for r in c.execute(
+                """SELECT t.id,t.title,t.severity,t.team,t.status,t.created_at,
+                          a.assigned_at,a.completed_at,a.approved_by
+                   FROM assignments a JOIN tickets t ON t.id=a.ticket_id
+                   WHERE a.engineer_id=?
+                   ORDER BY a.assigned_at DESC LIMIT 200""",
+                (engineer_id,),
+            )
+        ]
+
+
+@app.get("/api/engineers/{engineer_id}/history")
+def engineer_history(engineer_id: str):
+    """Resolved incidents this engineer actually closed. The evidence behind their score."""
+    with db() as c:
+        if not c.execute(
+            "SELECT 1 FROM engineers WHERE id=?", (engineer_id,)
+        ).fetchone():
+            raise HTTPException(404, "Engineer not found")
+        return [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM incidents WHERE resolved_by=? ORDER BY id LIMIT 100",
+                (engineer_id,),
+            )
+        ]
 
 
 @app.get("/api/tickets")
@@ -266,8 +320,8 @@ def tickets():
 
 
 @app.post("/api/tickets", status_code=201)
-def create(body: TicketInput):
-    return service.create_ticket(**body.model_dump())
+def create(body: TicketInput, request: Request):
+    return service.create_ticket(**body.model_dump(), actor=actor(request))
 
 
 @app.get("/api/tickets/{ticket_id}")
@@ -286,14 +340,16 @@ def get_ticket(ticket_id: str):
 
 
 @app.post("/api/tickets/{ticket_id}/route", status_code=202)
-async def route(ticket_id: str):
+async def route(ticket_id: str, request: Request):
+    who = actor(request)
     async with locks.setdefault(ticket_id, asyncio.Lock()):
-        await trueforge.start(ticket_id)
+        await trueforge.start(ticket_id, who)
     return get_ticket(ticket_id)
 
 
 @app.post("/api/tickets/{ticket_id}/decision")
-async def decision(ticket_id: str, body: Decision):
+async def decision(ticket_id: str, body: Decision, request: Request):
+    who = actor(request)
     async with locks.setdefault(ticket_id, asyncio.Lock()):
         with db(True) as c:
             t = ticket_row(c, ticket_id)
@@ -322,10 +378,10 @@ async def decision(ticket_id: str, body: Decision):
             ):
                 raise ValueError("Approval does not match the ranked primary engineer")
             if body.allow:
-                service.grant(c, t, args["engineer_id"], "operator")
+                service.grant(c, t, args["engineer_id"], who)
             else:
                 c.execute("DELETE FROM approvals WHERE ticket_id=?", (ticket_id,))
-                audit(c, "operator", "assignment.denied", ticket_id)
+                audit(c, who, "assignment.denied", ticket_id)
             c.execute(
                 "UPDATE tickets SET status=?,updated_at=? WHERE id=?",
                 ("approving" if body.allow else "rejected", now(), ticket_id),
@@ -335,8 +391,8 @@ async def decision(ticket_id: str, body: Decision):
 
 
 @app.post("/api/tickets/{ticket_id}/resolve")
-def resolve(ticket_id: str):
-    return service.resolve(ticket_id, "operator")
+def resolve(ticket_id: str, request: Request):
+    return service.resolve(ticket_id, actor(request))
 
 
 @app.get("/api/incidents")
