@@ -1,9 +1,14 @@
 import time
+from datetime import datetime
 
 from .store import audit, db, engineer_rows, now, ticket_row, uid
 
 
-def create_ticket(title, description, severity="High", team="", actor="operator"):
+# A ticket may be corrected only while nothing has been committed against it.
+EDITABLE = ("new", "manual_review", "error", "rejected", "fallback_review")
+
+
+def validate_ticket(title, description, severity):
     if (
         not 5 <= len(title.strip()) <= 180
         or not 15 <= len(description.strip()) <= 12000
@@ -13,6 +18,10 @@ def create_ticket(title, description, severity="High", team="", actor="operator"
         )
     if severity not in ("Low", "Medium", "High", "Critical"):
         raise ValueError("Invalid severity")
+
+
+def create_ticket(title, description, severity="High", team="", actor="operator"):
+    validate_ticket(title, description, severity)
     with db(True) as c:
         teams = {r["team"] for r in engineer_rows(c)}
         if team and team not in teams:
@@ -116,23 +125,86 @@ def assign(ticket_id, engineer_id):
         }
 
 
-def resolve(ticket_id, actor):
+def resolve(ticket_id, actor, root_cause="", resolution=""):
+    """Close a ticket and, when the engineer documents the outcome, add it to the
+    searchable incident history so future routing scores on it."""
+    root_cause, resolution = root_cause.strip(), resolution.strip()
+    documented = bool(root_cause and resolution)
+    if (root_cause or resolution) and not documented:
+        raise ValueError("Record both the root cause and the resolution, or neither")
+    if documented and (len(root_cause) > 2000 or len(resolution) > 2000):
+        raise ValueError("Root cause and resolution must each be under 2000 characters")
     with db(True) as c:
         ticket = ticket_row(c, ticket_id)
         if ticket["status"] == "resolved":
-            return ticket
+            return ticket_row(c, ticket_id)
         if ticket["status"] != "assigned":
             raise ValueError("Only assigned tickets can be resolved")
+        assignment = ticket["assignment"]
+        completed = now()
         c.execute(
             "UPDATE assignments SET completed_at=? WHERE ticket_id=?",
-            (now(), ticket_id),
+            (completed, ticket_id),
         )
         c.execute(
             "UPDATE tickets SET status='resolved',updated_at=? WHERE id=?",
-            (now(), ticket_id),
+            (completed, ticket_id),
         )
         audit(c, actor, "ticket.resolved", ticket_id)
+        if documented:
+            learn(c, ticket, assignment, completed, root_cause, resolution, actor)
         return ticket_row(c, ticket_id)
+
+
+def elapsed_minutes(start, end):
+    """Whole minutes between two ISO timestamps; at least 1, since the column requires it."""
+    try:
+        delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+        return max(1, int(delta.total_seconds() // 60))
+    except (TypeError, ValueError):
+        return 1
+
+
+def learn(c, ticket, assignment, completed, root_cause, resolution, actor):
+    """Write a resolved ticket into the incident history that routing searches.
+
+    Classification is inherited from the closest incident this ticket was matched
+    against, so a learned record is filed the same way its evidence was. With no
+    evidence the fields stay explicitly unclassified rather than invented.
+    """
+    recommendation = ticket["recommendation"] or {}
+    evidence = (recommendation.get("incidents") or [{}])[0]
+    incident_id = "INC-L" + ticket["id"].split("-")[-1][:10]
+    c.execute(
+        "INSERT OR REPLACE INTO incidents(id,title,description,product,component,team,category,severity,resolved_by,root_cause,resolution,resolution_minutes,source)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            incident_id,
+            ticket["title"],
+            ticket["description"],
+            evidence.get("product") or ticket["team"] or "Unclassified",
+            evidence.get("component") or "Unclassified",
+            ticket["team"] or evidence.get("team") or "Unclassified",
+            evidence.get("category") or "Unclassified",
+            ticket["severity"],
+            assignment["engineer_id"],
+            root_cause,
+            resolution,
+            elapsed_minutes(assignment["assigned_at"], completed),
+            "learned",
+        ),
+    )
+    audit(
+        c,
+        actor,
+        "history.learned",
+        ticket["id"],
+        {
+            "incident_id": incident_id,
+            "engineer_id": assignment["engineer_id"],
+            "component": evidence.get("component") or "Unclassified",
+        },
+    )
 
 
 def reassign(ticket_id, to_engineer_id, actor, reason=""):
@@ -202,4 +274,52 @@ def decide_fallback(ticket_id, allow, version, actor):
         )
     assign(ticket_id, engineer_id)
     with db() as c:
+        return ticket_row(c, ticket_id)
+
+
+def clarify(ticket_id, title, description, severity, team, actor):
+    """Correct an unrouted ticket so routing can be run again on better input.
+
+    Editing is the human half of the manual-review loop: the ranking is
+    deterministic, so re-running unchanged text can only repeat itself. Any
+    prior recommendation and approval are voided, exactly as re-ranking does.
+    """
+    validate_ticket(title, description, severity)
+    with db(True) as c:
+        ticket = ticket_row(c, ticket_id)
+        if ticket["status"] not in EDITABLE:
+            raise ValueError(
+                "A ticket can only be edited before it is assigned. "
+                "Reassign or resolve it instead."
+            )
+        teams = {r["team"] for r in engineer_rows(c)}
+        if team and team not in teams:
+            raise ValueError("Unknown owning team")
+        changed = [
+            field
+            for field, before, after in (
+                ("title", ticket["title"], title.strip()),
+                ("description", ticket["description"], description.strip()),
+                ("severity", ticket["severity"], severity),
+                ("team", ticket["team"], team),
+            )
+            if before != after
+        ]
+        if not changed:
+            raise ValueError("Change something before saving")
+        c.execute(
+            """UPDATE tickets SET title=?,description=?,severity=?,team=?,
+                      status='new',recommendation=NULL,error=NULL,
+                      version=version+1,updated_at=? WHERE id=?""",
+            (
+                title.strip(),
+                description.strip(),
+                severity,
+                team,
+                now(),
+                ticket_id,
+            ),
+        )
+        c.execute("DELETE FROM approvals WHERE ticket_id=?", (ticket_id,))
+        audit(c, actor, "ticket.clarified", ticket_id, {"fields": changed})
         return ticket_row(c, ticket_id)

@@ -194,6 +194,29 @@ def fail(ticket_id, message):
         audit(c, "system", "routing.failed", ticket_id, {"message": message[:500]})
 
 
+def decode(value):
+    """Tool arguments arrive as either a dict or a JSON string."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def unwrap(name, args):
+    """Normalise a tool call to (tool_name, tool_arguments).
+
+    TrueForge may deliver an MCP call directly, or wrapped in a generic
+    `call_tool` envelope carrying mcp_server / tool_name / input. Both shapes
+    have to resolve to the same tool name and arguments, or approval matching
+    silently breaks.
+    """
+    if name == "call_tool" or ("tool_name" in args and "input" in args):
+        return args.get("tool_name", ""), decode(args.get("input", {}))
+    return name, args
+
+
 def pending_calls(events):
     calls = {}
     pending = []
@@ -205,17 +228,15 @@ def pending_calls(events):
             for ref in event.get("tool_calls", []):
                 call = calls.get(ref["id"], {})
                 fn = call.get("function", {})
-                args = call.get("arguments", fn.get("arguments", {}))
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except ValueError:
-                        args = {}
+                args = decode(call.get("arguments", fn.get("arguments", {})))
+                name, args = unwrap(
+                    call.get("name") or fn.get("name", ""), args
+                )
                 pending.append(
                     {
                         "id": ref["id"],
                         "thread_id": event.get("thread_id", "main"),
-                        "name": call.get("name", fn.get("name", "")),
+                        "name": name,
                         "arguments": args,
                     }
                 )

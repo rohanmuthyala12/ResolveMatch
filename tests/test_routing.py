@@ -162,3 +162,142 @@ def test_reassign_enforces_team_availability_and_capacity():
         service.reassign(t["id"], "ENG-003", "Kevin Shah (ENG-001)")
     moved = service.reassign(t["id"], "ENG-002", "Kevin Shah (ENG-001)", "busy")
     assert moved["assignment"]["engineer_id"] == "ENG-002"
+
+
+def resolve_documented(ticket_id, actor="Kevin Shah (ENG-001)"):
+    return service.resolve(
+        ticket_id,
+        actor,
+        "Upstream CUSTOMER_ID changed from string to integer.",
+        "Updated downstream mappings and replayed the affected pipeline.",
+    )
+
+
+def test_documented_resolution_becomes_searchable_history():
+    """The learning loop: a resolved ticket must be findable as evidence afterwards."""
+    t = ticket()
+    service.assign(t["id"], approved(t))
+    resolve_documented(t["id"])
+    with db() as c:
+        learned = c.execute(
+            "SELECT * FROM incidents WHERE source='learned'"
+        ).fetchall()
+        assert len(learned) == 1
+        row = learned[0]
+        assert row["resolved_by"] == "ENG-001"
+        assert row["resolution_minutes"] >= 1
+        # It is classified like the evidence it was matched against, not invented.
+        assert row["component"] == "ETL Pipeline"
+        hits = routing.search(c, t["title"] + " " + t["description"], 20)
+    assert row["id"] in [h["id"] for h in hits]
+
+
+def test_learned_history_raises_the_resolver_next_time():
+    """Evidence gained by resolving must measurably change the next score."""
+    first = ticket()
+    with db() as c:
+        before = routing.recommendation(c, ticket_row(c, first["id"]))
+    baseline = next(e["score"] for e in before["candidates"] if e["id"] == "ENG-002")
+
+    # ENG-002 resolves a matching incident, documented.
+    t = ticket()
+    with db(True) as c:
+        c.execute("UPDATE engineers SET available=0 WHERE id='ENG-001'")
+    service.assign(t["id"], approved(t))
+    resolve_documented(t["id"], "Chris Lee (ENG-002)")
+    with db(True) as c:
+        c.execute("UPDATE engineers SET available=1 WHERE id='ENG-001'")
+
+    after_ticket = ticket()
+    with db() as c:
+        after = routing.recommendation(c, ticket_row(c, after_ticket["id"]))
+    gained = next(e for e in after["candidates"] if e["id"] == "ENG-002")
+    assert gained["score"] > baseline
+    assert any(i.startswith("INC-L") for i in gained["evidence_ids"])
+
+
+def test_resolution_notes_are_all_or_nothing():
+    t = ticket()
+    service.assign(t["id"], approved(t))
+    with pytest.raises(ValueError, match="both the root cause"):
+        service.resolve(t["id"], "someone", "cause only", "")
+    # Resolving without notes still works; it just teaches nothing.
+    service.resolve(t["id"], "someone")
+    with db() as c:
+        assert not c.execute(
+            "SELECT 1 FROM incidents WHERE source='learned'"
+        ).fetchone()
+
+
+VAGUE = ("Databricks Error", "Pipelines fails today all broken")
+CLEAR = (
+    "Databricks ingestion CUSTOMER_ID type mismatch",
+    "Databricks customer ETL pipeline ingestion CUSTOMER_ID type mismatch after schema change",
+)
+
+
+def test_clarifying_a_manual_review_ticket_lets_routing_succeed():
+    """The escalation must have a way back, or manual review is a dead end."""
+    t = service.create_ticket(*VAGUE)
+    assert routing.rank(t["id"])["manual_review"]
+    with db() as c:
+        stale_version = ticket_row(c, t["id"])["version"]
+    with db(True) as c:
+        c.execute("UPDATE tickets SET status='manual_review' WHERE id=?", (t["id"],))
+
+    fixed = service.clarify(
+        t["id"], *CLEAR, "High", "Data Platform", "Dana Whitfield (Manager)"
+    )
+    # Editing resets the ticket and voids the stale recommendation.
+    assert fixed["status"] == "new"
+    assert fixed["recommendation"] is None
+    # Version only ever moves forward, so an approval bound to the old text
+    # can never match again.
+    assert fixed["version"] > stale_version
+
+    after = routing.rank(t["id"])
+    assert not after["manual_review"]
+    assert after["primary"]["id"] == "ENG-001"
+    with db() as c:
+        actions = [
+            r["action"]
+            for r in c.execute("SELECT action FROM audit WHERE ticket_id=?", (t["id"],))
+        ]
+    assert "ticket.clarified" in actions
+
+
+def test_assigned_ticket_cannot_be_edited():
+    """Editing after assignment would change a ticket out from under its approval."""
+    t = ticket()
+    service.assign(t["id"], approved(t))
+    with pytest.raises(ValueError, match="before it is assigned"):
+        service.clarify(
+            t["id"], *CLEAR, "Low", "Data Platform", "Dana Whitfield (Manager)"
+        )
+    service.resolve(t["id"], "someone")
+    with pytest.raises(ValueError, match="before it is assigned"):
+        service.clarify(
+            t["id"], *CLEAR, "Low", "Data Platform", "Dana Whitfield (Manager)"
+        )
+
+
+def test_clarify_voids_a_pending_approval_and_rejects_noop_edits():
+    t = ticket()
+    approved(t)  # leaves an unconsumed approval and awaiting_approval status
+    with db(True) as c:
+        c.execute("UPDATE tickets SET status='manual_review' WHERE id=?", (t["id"],))
+    service.clarify(
+        t["id"], *CLEAR, "High", "Data Platform", "Dana Whitfield (Manager)"
+    )
+    with db() as c:
+        assert not c.execute(
+            "SELECT 1 FROM approvals WHERE ticket_id=?", (t["id"],)
+        ).fetchone()
+    with pytest.raises(ValueError, match="Change something"):
+        service.clarify(
+            t["id"], *CLEAR, "High", "Data Platform", "Dana Whitfield (Manager)"
+        )
+    with pytest.raises(ValueError, match="Unknown owning team"):
+        service.clarify(
+            t["id"], "A clearer title here", CLEAR[1], "High", "Nope", "Dana"
+        )

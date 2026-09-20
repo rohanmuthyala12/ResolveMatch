@@ -127,6 +127,7 @@ type QueueItem = {
 
 type Ops = {
   budget: { used: number; limit: number; blocked: number };
+  learning: { incidents_learned: number; documented_resolutions: number };
   runs: Record<string, number | null>;
   tokens: Record<string, number>;
   tools: { name: string; calls: number; avg_seconds: number | null }[];
@@ -197,6 +198,15 @@ function App() {
     [tickets, setTickets] = useState<Ticket[]>([]),
     [engineers, setEngineers] = useState<Engineer[]>([]),
     [ops, setOps] = useState<Ops | null>(null),
+    [editOpen, setEditOpen] = useState(false),
+    [edit, setEdit] = useState({
+      title: "",
+      description: "",
+      severity: "High",
+      team: "",
+    }),
+    [rootCause, setRootCause] = useState(""),
+    [resolutionText, setResolutionText] = useState(""),
     [reassignTo, setReassignTo] = useState(""),
     [reassignReason, setReassignReason] = useState(""),
     [status, setStatus] = useState<Status | null>(null);
@@ -387,6 +397,9 @@ function App() {
   ).length;
   const pending = tickets.filter((t) =>
     ["awaiting_approval", "fallback_review"].includes(t.status),
+  ).length;
+  const needsClarifying = tickets.filter(
+    (t) => t.status === "manual_review",
   ).length;
   const available = engineers.filter(
     (e) => e.available && e.active_tickets < e.capacity,
@@ -667,6 +680,12 @@ function App() {
                   icon={<ShieldCheck size={19} />}
                 />
                 <Metric
+                  title="Needs clarifying"
+                  value={needsClarifying}
+                  sub="Escalated: evidence too weak to route"
+                  icon={<AlertCircle size={19} />}
+                />
+                <Metric
                   title="Engineers available"
                   value={available}
                   sub={`Of ${engineers.length} team members`}
@@ -909,9 +928,132 @@ function App() {
                       <h2>Human review needed</h2>
                       <p>{selected.recommendation.reason}</p>
                       <p>
-                        No assignment will be made. Clarify the incident or add
-                        relevant historical evidence before rerunning.
+                        No assignment will be made. Re-running unchanged text
+                        repeats this result, so sharpen the incident first.
                       </p>
+                      {isManager &&
+                        (editOpen ? (
+                          <div className="clarify-form">
+                            <label>
+                              Title
+                              <input
+                                value={edit.title}
+                                maxLength={180}
+                                onChange={(e) =>
+                                  setEdit({ ...edit, title: e.target.value })
+                                }
+                              />
+                            </label>
+                            <label>
+                              Description
+                              <textarea
+                                rows={3}
+                                value={edit.description}
+                                maxLength={12000}
+                                onChange={(e) =>
+                                  setEdit({
+                                    ...edit,
+                                    description: e.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                            <div className="clarify-row">
+                              <label>
+                                Severity
+                                <select
+                                  value={edit.severity}
+                                  onChange={(e) =>
+                                    setEdit({
+                                      ...edit,
+                                      severity: e.target.value,
+                                    })
+                                  }
+                                >
+                                  {["Low", "Medium", "High", "Critical"].map(
+                                    (x) => (
+                                      <option key={x} value={x}>
+                                        {x}
+                                      </option>
+                                    ),
+                                  )}
+                                </select>
+                              </label>
+                              <label>
+                                Owning team
+                                <select
+                                  value={edit.team}
+                                  onChange={(e) =>
+                                    setEdit({ ...edit, team: e.target.value })
+                                  }
+                                >
+                                  <option value="">
+                                    Let the agent infer it
+                                  </option>
+                                  {[
+                                    ...new Set(engineers.map((x) => x.team)),
+                                  ].map((x) => (
+                                    <option key={x} value={x}>
+                                      {x}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
+                            <div className="clarify-actions">
+                              <button
+                                className="secondary"
+                                disabled={busy}
+                                onClick={() => setEditOpen(false)}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                className="primary"
+                                disabled={busy}
+                                onClick={() =>
+                                  act(async () => {
+                                    const saved = await api<Ticket>(
+                                      `/tickets/${selected.id}`,
+                                      "PATCH",
+                                      edit,
+                                    );
+                                    setEditOpen(false);
+                                    setSelected(
+                                      await api<Ticket>(
+                                        `/tickets/${saved.id}/route`,
+                                        "POST",
+                                      ),
+                                    );
+                                    await refresh();
+                                  })
+                                }
+                              >
+                                Save and run routing
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            className="secondary"
+                            onClick={() => {
+                              setEdit({
+                                title: selected.title,
+                                description: selected.description,
+                                severity: selected.severity,
+                                team: selected.team,
+                              });
+                              setEditOpen(true);
+                            }}
+                          >
+                            Clarify this incident
+                          </button>
+                        ))}
+                      {!isManager && (
+                        <p className="hint">
+                          A manager reviews and clarifies escalated incidents.
+                        </p>
+                      )}
                     </section>
                   )}
                   {selected.recommendation?.primary && (
@@ -1019,23 +1161,51 @@ function App() {
                       {selected.status === "assigned" &&
                         (isManager ||
                           selected.assignment.engineer_id === persona?.id) && (
-                          <button
-                            className="secondary"
-                            disabled={busy}
-                            onClick={() =>
-                              act(async () => {
-                                setSelected(
-                                  await api<Ticket>(
-                                    `/tickets/${selected.id}/resolve`,
-                                    "POST",
-                                  ),
-                                );
-                                await refresh();
-                              })
-                            }
-                          >
-                            Mark resolved
-                          </button>
+                          <div className="resolve-form">
+                            <p className="resolve-hint">
+                              Document the outcome and it becomes searchable
+                              history the next routing run scores on.
+                            </p>
+                            <input
+                              placeholder="Root cause"
+                              value={rootCause}
+                              maxLength={2000}
+                              onChange={(e) => setRootCause(e.target.value)}
+                            />
+                            <input
+                              placeholder="Resolution - what fixed it"
+                              value={resolutionText}
+                              maxLength={2000}
+                              onChange={(e) =>
+                                setResolutionText(e.target.value)
+                              }
+                            />
+                            <button
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() =>
+                                act(async () => {
+                                  setSelected(
+                                    await api<Ticket>(
+                                      `/tickets/${selected.id}/resolve`,
+                                      "POST",
+                                      {
+                                        root_cause: rootCause,
+                                        resolution: resolutionText,
+                                      },
+                                    ),
+                                  );
+                                  setRootCause("");
+                                  setResolutionText("");
+                                  await refresh();
+                                })
+                              }
+                            >
+                              {rootCause && resolutionText
+                                ? "Resolve and add to history"
+                                : "Mark resolved"}
+                            </button>
+                          </div>
                         )}
                       {selected.status === "assigned" &&
                         (isManager ||

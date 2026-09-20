@@ -230,7 +230,7 @@ def seed():
         ) in enumerate(CASES):
             for variant in range(5):
                 c.execute(
-                    "INSERT INTO incidents VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO incidents(id,title,description,product,component,team,category,severity,resolved_by,root_cause,resolution,resolution_minutes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         f"INC-{1000 + index * 5 + variant}",
                         f"{title} · service {variant + 1}",

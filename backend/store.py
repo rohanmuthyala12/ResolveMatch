@@ -76,6 +76,11 @@ def initialize():
         CREATE INDEX IF NOT EXISTS incidents_resolver ON incidents(resolved_by);
         CREATE INDEX IF NOT EXISTS assignments_engineer ON assignments(engineer_id,completed_at);
         """)
+        inc_cols = {r["name"] for r in c.execute("PRAGMA table_info(incidents)")}
+        if "source" not in inc_cols:
+            c.execute(
+                "ALTER TABLE incidents ADD COLUMN source TEXT NOT NULL DEFAULT 'seed'"
+            )
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tickets)")}
         if "attempts" not in cols:
             c.execute("ALTER TABLE tickets ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")

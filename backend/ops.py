@@ -13,6 +13,7 @@ COUNTED = (
     "routing.fallback",
     "routing.failed",
     "assignment.approved",
+    "history.learned",
     "assignment.denied",
     "ticket.assigned",
     "ticket.reassigned",
@@ -74,6 +75,9 @@ def overview():
             {r["action"]: r["n"] for r in c.execute("SELECT action,COUNT(*) n FROM audit GROUP BY action")}
         )
         tickets = c.execute("SELECT id,status,events,recommendation FROM tickets").fetchall()
+        learned = c.execute(
+            "SELECT COUNT(*) FROM incidents WHERE source='learned'"
+        ).fetchone()[0]
         failures = [
             dict(r)
             for r in c.execute(
@@ -132,6 +136,10 @@ def overview():
             key=lambda x: -x["calls"],
         ),
         "guardrails": [{"name": k, "count": v} for k, v in guardrails.items() if v],
+        "learning": {
+            "incidents_learned": learned,
+            "documented_resolutions": audit["history.learned"],
+        },
         "approvals": {
             "approved": audit["assignment.approved"],
             "denied": audit["assignment.denied"],

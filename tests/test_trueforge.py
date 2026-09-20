@@ -227,3 +227,52 @@ async def test_hourly_run_budget_blocks_extra_runs(monkeypatch):
     await trueforge.start(a["id"])
     with pytest.raises(ValueError, match="budget"):
         await trueforge.start(b["id"])
+
+
+def approval_events(tool_call):
+    return [
+        {"id": "e1", "type": "model.message", "tool_calls": [tool_call]},
+        {
+            "id": "e2",
+            "type": "tool.approval_required",
+            "thread_id": "main",
+            "tool_calls": [{"id": "call1", "source_event_id": "e1"}],
+        },
+    ]
+
+
+def test_pending_calls_handles_both_flat_and_call_tool_envelopes():
+    """TrueForge may wrap an MCP call in a generic call_tool envelope."""
+    flat = {
+        "id": "call1",
+        "type": "function",
+        "function": {
+            "name": "resolvematch_assign_ticket",
+            "arguments": json.dumps({"ticket_id": "RM-1", "engineer_id": "ENG-001"}),
+        },
+    }
+    wrapped = {
+        "id": "call1",
+        "name": "call_tool",
+        "arguments": {
+            "mcp_server": "resolvematch",
+            "tool_name": "assign_ticket",
+            "input": {"ticket_id": "RM-1", "engineer_id": "ENG-001"},
+        },
+    }
+    wrapped_str_input = {
+        "id": "call1",
+        "name": "call_tool",
+        "arguments": json.dumps(
+            {
+                "mcp_server": "resolvematch",
+                "tool_name": "assign_ticket",
+                "input": json.dumps({"ticket_id": "RM-1", "engineer_id": "ENG-001"}),
+            }
+        ),
+    }
+    for shape in (flat, wrapped, wrapped_str_input):
+        got = trueforge.pending_calls(approval_events(shape))
+        assert len(got) == 1
+        assert got[0]["name"].endswith("assign_ticket")
+        assert got[0]["arguments"] == {"ticket_id": "RM-1", "engineer_id": "ENG-001"}

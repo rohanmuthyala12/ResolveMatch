@@ -174,6 +174,18 @@ class TicketInput(StrictModel):
     team: str = Field(default="", max_length=80)
 
 
+class TicketEdit(StrictModel):
+    title: str = Field(min_length=5, max_length=180)
+    description: str = Field(min_length=15, max_length=12000)
+    severity: Literal["Low", "Medium", "High", "Critical"] = "High"
+    team: str = Field(default="", max_length=60)
+
+
+class Resolution(StrictModel):
+    root_cause: str = Field(default="", max_length=2000)
+    resolution: str = Field(default="", max_length=2000)
+
+
 class Reassign(StrictModel):
     engineer_id: str = Field(min_length=1, max_length=40)
     reason: str = Field(default="", max_length=300)
@@ -346,6 +358,19 @@ def get_ticket(ticket_id: str):
     return result
 
 
+@app.patch("/api/tickets/{ticket_id}")
+def clarify(ticket_id: str, body: TicketEdit, request: Request):
+    """Correct an unrouted ticket; the manual-review escalation needs a way back."""
+    return service.clarify(
+        ticket_id,
+        body.title,
+        body.description,
+        body.severity,
+        body.team,
+        actor(request),
+    )
+
+
 @app.post("/api/tickets/{ticket_id}/route", status_code=202)
 async def route(ticket_id: str, request: Request):
     who = actor(request)
@@ -408,8 +433,11 @@ def reassign(ticket_id: str, body: Reassign, request: Request):
 
 
 @app.post("/api/tickets/{ticket_id}/resolve")
-def resolve(ticket_id: str, request: Request):
-    return service.resolve(ticket_id, actor(request))
+def resolve(ticket_id: str, body: Resolution | None = None, request: Request = None):
+    body = body or Resolution()
+    return service.resolve(
+        ticket_id, actor(request), body.root_cause, body.resolution
+    )
 
 
 @app.get("/api/incidents")

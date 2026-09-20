@@ -42,6 +42,37 @@ def make(available=None, capacity=None):
     return apply
 
 
+def learn_then_rank():
+    """End-to-end: a documented resolution must raise its resolver's next score."""
+    t = service.create_ticket("Databricks schema mismatch", DB_DESC, "High", "Data Platform")
+    with db() as c:
+        before = routing.recommendation(c, ticket_row(c, t["id"]))
+    base = next(e["score"] for e in before["candidates"] if e["id"] == "ENG-002")
+    rec = routing.rank(t["id"])
+    with db(True) as c:
+        c.execute("UPDATE tickets SET status='awaiting_approval' WHERE id=?", (t["id"],))
+        service.grant(c, ticket_row(c, t["id"]), rec["primary"]["id"], "eval")
+    service.assign(t["id"], rec["primary"]["id"])
+    service.resolve(
+        t["id"],
+        "eval",
+        "Upstream CUSTOMER_ID changed from string to integer.",
+        "Updated downstream mappings and replayed the pipeline.",
+    )
+    after_t = service.create_ticket("Databricks schema mismatch", DB_DESC, "High", "Data Platform")
+    with db() as c:
+        after = routing.recommendation(c, ticket_row(c, after_t["id"]))
+    winner = after["primary"]
+    resolver = rec["primary"]["id"]
+    gained = next(e["score"] for e in after["candidates"] if e["id"] == resolver)
+    base_resolver = next(e["score"] for e in before["candidates"] if e["id"] == resolver)
+    return {
+        "learned_used": bool(winner and any(i.startswith("INC-L") for i in winner["evidence_ids"])),
+        "score_rose": gained > base_resolver,
+        "other_unchanged": base == base,
+    }
+
+
 def primary(r):
     return r["primary"]["id"] if r["primary"] else None
 
@@ -65,6 +96,8 @@ CASES = [
      lambda r: r["team"] == "Identity" and primary(r) in ("ENG-008", "ENG-009")),
     ("Prompt injection in ticket is ignored", lambda: run("Databricks schema mismatch", INJECT),
      lambda r: primary(r) != "ENG-010" and r["team"] == "Data Platform"),
+    ("Documented resolution feeds back into routing", learn_then_rank,
+     lambda r: r["learned_used"] and r["score_rose"]),
     ("Score is bounded and explained", lambda: run("Databricks schema mismatch", DB_DESC),
      lambda r: 0 <= r["primary"]["score"] <= 100 and sum(r["primary"]["breakdown"].values()) == r["primary"]["score"]),
 ]

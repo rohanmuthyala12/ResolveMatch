@@ -72,7 +72,7 @@ def import_data(path):
             )
         for incident in data.incidents:
             c.execute(
-                "INSERT INTO incidents VALUES(:id,:title,:description,:product,:component,:team,:category,:severity,:resolved_by,:root_cause,:resolution,:resolution_minutes)",
+                "INSERT INTO incidents(id,title,description,product,component,team,category,severity,resolved_by,root_cause,resolution,resolution_minutes) VALUES(:id,:title,:description,:product,:component,:team,:category,:severity,:resolved_by,:root_cause,:resolution,:resolution_minutes)",
                 incident.model_dump(),
             )
         c.execute("INSERT OR REPLACE INTO metadata VALUES('dataset','imported')")
@@ -98,7 +98,10 @@ def export_data(path):
             engineers.append(e)
         result = {
             "engineers": engineers,
-            "incidents": [dict(r) for r in c.execute("SELECT * FROM incidents")],
+            "incidents": [
+                dict(r)
+                for r in c.execute("SELECT id,title,description,product,component,team,category,severity,resolved_by,root_cause,resolution,resolution_minutes FROM incidents")
+            ],
         }
     with Path(path).open("x") as handle:
         json.dump(result, handle, indent=2)
